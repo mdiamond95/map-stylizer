@@ -3,6 +3,7 @@ import { PROJECTIONS } from './core/projections.js';
 import { TRANSFORMS, fitModel, minPoints, optimiseParams } from './core/georef.js';
 import { buildReference, searchPlaces, DETAIL_LEVELS } from './core/reference.js';
 import { makePixelPath, buildPixelLayers } from './core/render.js';
+import { loadOsm, makeTileFetcher, OSM_ATTRIBUTION } from './core/osm.js';
 import { buildSvg } from './core/svg.js';
 import { STYLES } from './styles/index.js';
 import { ImageViewer } from './ui/viewer.js';
@@ -24,6 +25,7 @@ const LAYERS = [
   { id: 'countryLabels', name: 'Country labels' },
   { id: 'placeLabels', name: 'City labels' },
   { id: 'graticule', name: 'Lat/lon grid' },
+  { id: 'buildings', name: 'Buildings (streets detail)' },
   { id: 'traced', name: 'Traced shapes' }
 ];
 
@@ -35,8 +37,10 @@ function newProject() {
     gcps: [],
     georef: { projection: 'equirectangular', params: null, transform: 'polynomial' },
     detail: 'medium',
+    detailAuto: true,
+    basemap: 'streets',
     options: { riverRank: 6, placeLimit: 40, placeRank: 4 },
-    show: { land: true, borders: true, coastline: true, provinceLines: true, rivers: true, lakes: true, places: true, countryLabels: true, placeLabels: true, graticule: false, traced: true },
+    show: { land: true, borders: true, coastline: true, provinceLines: true, rivers: true, lakes: true, places: true, countryLabels: true, placeLabels: true, graticule: false, buildings: false, traced: true },
     highlight: [], fade: [], names: {}, labelHide: [],
     traced: [],
     style: 'clean-explainer',
@@ -58,7 +62,9 @@ let layersCache = null;
 let nextId = 1;
 
 // ---------- reference data ----------
+// The streets detail level still uses Natural Earth for anything outside OSM tiles.
 async function getRef(detail) {
+  if (detail === 'streets') detail = 'medium';
   if (!refs[detail]) {
     const file = DETAIL_LEVELS.find((d) => d.id === detail).file;
     refs[detail] = fetch(`${BASE}data/${file}`).then((r) => r.json()).then(buildReference);
@@ -71,6 +77,7 @@ const pinViewer = new ImageViewer($('#pin-image'), { onTap: onPinImageTap, onPin
 const checkViewer = new ImageViewer($('#check-image'), { onTap: onCheckTap });
 const refMap = new RefMap($('#pin-map'), {
   onTap: onMapTap,
+  onBasemap: (mode, problem) => { if (problem) toast(problem); syncBasemap(); },
   onPinMove: (id, ll) => updatePin(id, { lonlat: ll })
 });
 getRef('medium').then((ref) => refMap.setReference(ref));
@@ -193,6 +200,7 @@ function renderPins() {
   if (!project.image) hint.textContent = 'Open a map image, then tap a spot on it and the same spot on the reference map. Cities snap exactly.';
   else if (pending) hint.textContent = project.gcps.find((g) => g.id === pending)?.pixel ? 'Now tap the same place on the reference map, or search for it.' : 'Now tap that place on your map image.';
   else if (n < 4) hint.textContent = `Pin ${4 - n} more point${4 - n === 1 ? '' : 's'}. Spread them out: corners and edges work best.`;
+  else if (model && model.rmse > Math.hypot(project.image.width, project.image.height) * 0.01) hint.textContent = project.georef.transform === 'thinPlateSpline' ? 'Some points disagree. Check the red ones are on exactly the same spot in both maps.' : 'Some points disagree. Check the red ones, or for an old or hand-drawn map set Fit to Rubber sheet.';
   else hint.textContent = 'Looking good. Add points where lines drift, or go to Check.';
 }
 
@@ -200,7 +208,7 @@ function renderPins() {
 function populateSelects() {
   $('#projection').innerHTML = PROJECTIONS.map((p) => `<option value="${p.id}">${p.name}</option>`).join('');
   $('#transform').innerHTML = TRANSFORMS.map((t) => `<option value="${t.id}">${t.name}</option>`).join('');
-  $('#detail').innerHTML = DETAIL_LEVELS.map((d) => `<option value="${d.id}">${d.name}</option>`).join('');
+  $('#detail').innerHTML = [...DETAIL_LEVELS, { id: 'streets', name: 'Streets (OpenStreetMap, for city maps)' }].map((d) => `<option value="${d.id}">${d.name}</option>`).join('');
 }
 populateSelects();
 
@@ -268,30 +276,121 @@ function refit() {
   st.innerHTML = exact
     ? (model.looRmse != null ? `Rubber sheet passes through every point. Check error: <b>${model.looRmse.toFixed(1)} px</b> (${pct(model.looRmse)} of the image), predicting each point from the others.` : 'Rubber sheet passes through every point. Add 5 or more for an error check.')
     : `Average error <b>${model.rmse.toFixed(1)} px</b> (${pct(model.rmse)} of the image)${model.looRmse != null ? `; check error ${model.looRmse.toFixed(1)} px` : ''}.`;
+  if (project.detailAuto) {
+    const km = extentKm();
+    project.detail = km < 60 ? 'streets' : km < 2500 ? 'high' : 'medium';
+    $('#detail').value = project.detail;
+  }
   drawPinOverlay();
 }
 
+// Rough width of the map in kilometres, from its corners.
+function imageBbox() {
+  const W = project.image.width, H = project.image.height;
+  const pts = [];
+  for (let i = 0; i <= 8; i++) { const t = i / 8; pts.push([t * W, 0], [t * W, H], [0, t * H], [W, t * H]); }
+  const ll = pts.map((p) => model.pixelToLonlat(p)).filter((q) => q && isFinite(q[0]) && isFinite(q[1]));
+  if (!ll.length) return null;
+  const lons = ll.map((q) => q[0]), lats = ll.map((q) => q[1]);
+  return [Math.min(...lons), Math.max(-85, Math.min(...lats)), Math.max(...lons), Math.min(85, Math.max(...lats))];
+}
+function extentKm() {
+  const b = imageBbox();
+  if (!b) return Infinity;
+  const midLat = (b[1] + b[3]) / 2 * Math.PI / 180;
+  return Math.hypot((b[2] - b[0]) * 111.32 * Math.cos(midLat), (b[3] - b[1]) * 110.57);
+}
+
+// OpenStreetMap tiles for the map's area, cached per area so refits that
+// barely move the map don't download again.
+const osmCache = new Map();
+const fetchTile = makeTileFetcher();
+function getOsm() {
+  const b = imageBbox();
+  if (!b) return Promise.resolve(null);
+  const pad = 0.05 * Math.max(b[2] - b[0], b[3] - b[1]);
+  const box = [b[0] - pad, b[1] - pad, b[2] + pad, b[3] + pad].map((v) => Math.round(v * 200) / 200);
+  const key = box.join(',');
+  if (!osmCache.has(key)) {
+    const p = loadOsm(box, fetchTile, { onProgress: (n, t) => { if (t > 4) toast(`Loading OpenStreetMap… ${n} of ${t} tiles`, 1500); } });
+    p.catch(() => osmCache.delete(key));
+    osmCache.set(key, p);
+  }
+  return osmCache.get(key);
+}
+
+let overlayTimer = null;
 async function drawPinOverlay() {
   if (!model) return;
-  const ref = await getRef('medium');
   const { path } = makePixelPath(model, project.image.width, project.image.height);
+  if (project.detail === 'streets') {
+    // City maps: preview main roads and shorelines once there are enough
+    // points for the fit to be roughly right, debounced while pins move.
+    pinViewer.setOverlay('');
+    if (project.gcps.filter((g) => g.pixel && g.lonlat).length < 4) return;
+    clearTimeout(overlayTimer);
+    overlayTimer = setTimeout(async () => {
+      try {
+        const osm = await getOsm();
+        if (!osm || !model || project.detail !== 'streets') return;
+        const { path: p } = makePixelPath(model, project.image.width, project.image.height);
+        const fc = (features) => ({ type: 'FeatureCollection', features });
+        const roads = osm.roads.filter((r) => r.properties.class === 'major' || r.properties.class === 'medium');
+        pinViewer.setOverlay(`<path class="ov-water" d="${p(fc(osm.water)) || ''}"/><path class="ov-border" d="${p(fc(roads)) || ''}"/>`);
+      } catch (err) { toast(`Couldn't load OpenStreetMap: ${err.message || err}`); }
+    }, 800);
+    return;
+  }
+  const ref = await getRef('medium');
   pinViewer.setOverlay(`<path class="ov-coast" d="${path(ref.coastline) || ''}"/><path class="ov-border" d="${path(ref.borders) || ''}"/>`);
 }
 
 // ---------- place search ----------
-$('#place-search').addEventListener('input', async (e) => {
+// Cities come from the bundled data instantly; streets, landmarks and
+// addresses come from OpenStreetMap's Nominatim, favouring what's on screen.
+let searchSeq = 0, searchTimer = null;
+$('#place-search').addEventListener('input', (e) => runSearch(e.target.value, false));
+$('#place-search').addEventListener('keydown', (e) => { if (e.key === 'Enter') runSearch(e.target.value, true); });
+async function runSearch(q, now) {
+  const seq = ++searchSeq;
   const ref = await getRef('medium');
-  const hits = searchPlaces(ref, e.target.value);
+  const local = searchPlaces(ref, q).map((h) => ({ ...h, zoom: 6 }));
+  showResults(local, q.trim().length >= 3 ? 'Searching streets and landmarks…' : '');
+  clearTimeout(searchTimer);
+  if (q.trim().length < 3) return;
+  searchTimer = setTimeout(async () => {
+    try {
+      const [w, s, e2, n] = refMap.bounds();
+      const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=6&accept-language=en&q=${encodeURIComponent(q)}&viewbox=${w},${n},${e2},${s}`;
+      const res = await fetch(url, { headers: { Accept: 'application/json' } });
+      const found = (await res.json()).map((r) => ({ name: r.name || r.display_name.split(',')[0], detail: r.display_name.split(',').slice(1, 3).join(',').trim(), lonlat: [+r.lon, +r.lat], zoom: 16 }));
+      if (seq === searchSeq) showResults([...local, ...found], found.length || local.length ? '' : 'No matches.');
+    } catch {
+      if (seq === searchSeq) showResults(local, local.length ? '' : 'Street search needs a connection.');
+    }
+  }, now ? 0 : 700);
+}
+function showResults(hits, note) {
   const ul = $('#place-results');
-  ul.innerHTML = hits.map((h, i) => `<li data-i="${i}">${esc(h.name)} <small>${esc(h.detail || '')}</small></li>`).join('');
-  ul.querySelectorAll('li').forEach((li) => li.addEventListener('click', () => {
+  ul.innerHTML = hits.map((h, i) => `<li data-i="${i}">${esc(h.name)} <small>${esc(h.detail || '')}</small></li>`).join('') + (note ? `<li class="note">${esc(note)}</li>` : '');
+  ul.querySelectorAll('li[data-i]').forEach((li) => li.addEventListener('click', () => {
     const h = hits[+li.dataset.i];
-    refMap.flyTo(h.lonlat, 4);
+    refMap.flyTo(h.lonlat, h.zoom);
     if (project.image) completeWithLonlat(h.lonlat, h.name);
     ul.innerHTML = '';
-    e.target.value = '';
+    $('#place-search').value = '';
+    searchSeq++;
   }));
-});
+}
+
+// ---------- basemap ----------
+document.querySelectorAll('#basemap button').forEach((b) => b.addEventListener('click', () => {
+  refMap.setBasemap(b.dataset.mode);
+  project.basemap = b.dataset.mode; syncBasemap(); save();
+}));
+function syncBasemap() {
+  document.querySelectorAll('#basemap button').forEach((b) => b.classList.toggle('active', b.dataset.mode === refMap.basemap));
+}
 
 // ---------- check view ----------
 function buildToggles() {
@@ -309,6 +408,8 @@ function syncControls() {
   $('#projection').value = project.georef.projection;
   $('#transform').value = project.georef.transform;
   $('#detail').value = project.detail;
+  if (project.basemap) refMap.setBasemap(project.basemap);
+  syncBasemap();
   $('#river-rank').value = project.options.riverRank;
   $('#place-limit').value = project.options.placeLimit;
   document.querySelectorAll('#layer-toggles input').forEach((i) => { i.checked = !!project.show[i.dataset.layer]; });
@@ -323,7 +424,7 @@ function syncControls() {
 }
 
 $('#project-name').addEventListener('change', (e) => { project.name = e.target.value.trim() || 'Untitled map'; save(); });
-$('#detail').addEventListener('change', (e) => { project.detail = e.target.value; layersCache = null; refreshCheck(); save(); });
+$('#detail').addEventListener('change', (e) => { project.detail = e.target.value; project.detailAuto = false; layersCache = null; drawPinOverlay(); refreshCheck(); save(); });
 $('#river-rank').addEventListener('change', (e) => { project.options.riverRank = +e.target.value; layersCache = null; refreshCheck(); save(); });
 $('#place-limit').addEventListener('change', (e) => { project.options.placeLimit = +e.target.value; layersCache = null; refreshCheck(); save(); });
 $('#image-opacity').addEventListener('input', (e) => checkViewer.setImageOpacity(e.target.value));
@@ -333,13 +434,21 @@ async function getLayers() {
   if (layersCache) return layersCache;
   const ref = await getRef(project.detail);
   if (!model) return null;
+  let osm = null;
+  if (project.detail === 'streets') {
+    try { osm = await getOsm(); } catch (err) {
+      toast(`Couldn't load OpenStreetMap, so showing Natural Earth instead. ${err.message || err}`, 5000);
+    }
+  }
   toast('Drawing layers…', 800);
   layersCache = buildPixelLayers(ref, model, project.image.width, project.image.height, {
     riverRank: project.options.riverRank,
     placeRank: project.options.placeRank,
     placeLimit: project.options.placeLimit,
-    provinces: true
+    provinces: true,
+    osm
   });
+  layersCache.osmRaw = osm;
   return layersCache;
 }
 
@@ -350,6 +459,17 @@ async function refreshCheck() {
   const sh = project.show;
   const hi = new Set(project.highlight), fa = new Set(project.fade);
   let out = '';
+  if (L.osm) {
+    const o = L.osm;
+    out += `<path class="ck-park" d="${o.parks}"/><path class="ck-water" d="${o.water}"/>`;
+    if (sh.buildings) out += `<path class="ck-building" d="${o.buildings}"/>`;
+    if (sh.rivers) out += `<path class="ck-river" d="${o.waterways}"/>`;
+    out += `<path class="ck-road-minor" d="${o.roads.minor}"/><path class="ck-road" d="${o.roads.medium}"/><path class="ck-road-major" d="${o.roads.major}"/><path class="ck-rail" d="${o.roads.rail}"/>`;
+    if (sh.traced) out += project.traced.map((t) => `<g class="ck-traced">${t.paths.map((d) => `<path d="${d}" fill="${t.fill}"/>`).join('')}</g>`).join('');
+    checkViewer.setOverlay(out);
+    renderSelection({ countries: [] });
+    return;
+  }
   if (sh.land) out += `<g class="ck-land">${L.countries.map((c) => `<path data-id="${c.id}" class="${hi.has(c.id) ? 'hi' : fa.has(c.id) ? 'fa' : ''} ${c.id === selectedCountry ? 'sel' : ''}" d="${c.d}"/>`).join('')}</g>`;
   if (sh.graticule) out += `<path class="ck-grat" d="${L.graticule}"/>`;
   if (sh.lakes) out += L.lakes.map((l) => `<path class="ck-lake" d="${l.d}"/>`).join('');
@@ -513,7 +633,13 @@ $('#export-geojson').addEventListener('click', async () => {
   for (const g of project.gcps.filter((q) => q.pixel && q.lonlat)) {
     features.push({ type: 'Feature', geometry: { type: 'Point', coordinates: g.lonlat }, properties: { layer: 'control-points', pixel: g.pixel, place: g.place || null } });
   }
-  const fc = { type: 'FeatureCollection', properties: { source: 'Natural Earth (public domain)', georef: project.georef }, features };
+  const osm = L.osmRaw;
+  if (osm) {
+    const add = (layer, list) => list.forEach((f) => features.push({ type: 'Feature', geometry: f.geometry, properties: { layer, ...(f.properties || {}) } }));
+    add('roads', osm.roads); add('water', osm.water); add('waterways', osm.waterways); add('parks', osm.parks); add('places', osm.places);
+  }
+  const source = osm ? `Natural Earth (public domain); ${OSM_ATTRIBUTION} (ODbL)` : 'Natural Earth (public domain)';
+  const fc = { type: 'FeatureCollection', properties: { source, georef: project.georef }, features };
   download(`${fileBase()}.geojson`, JSON.stringify(fc), 'application/geo+json');
 });
 

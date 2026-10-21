@@ -46,7 +46,8 @@ export function buildSvg(layers, style, opts = {}) {
     return out;
   };
 
-  for (const layer of LAYER_ORDER) {
+  if (layers.osm) parts.push(cityParts(layers, style, { s, frame, show, opts, line, L }));
+  for (const layer of layers.osm ? [] : LAYER_ORDER) {
     if (layer === 'ocean') {
       parts.push(group('ocean', `<rect x="${fmt(frame.x - frame.w)}" y="${fmt(frame.y - frame.h)}" width="${fmt(frame.w * 3)}" height="${fmt(frame.h * 3)}" fill="${style.ocean}"/>`));
     } else if (layer === 'graticule' && show.graticule) {
@@ -89,8 +90,98 @@ export function buildSvg(layers, style, opts = {}) {
     }
   }
 
-  const credit = opts.credit !== false ? `<desc>Made with Map Stylizer. Reference data: Natural Earth (public domain).</desc>` : '';
+  const source = layers.osm ? '© OpenMapTiles © OpenStreetMap contributors (ODbL)' : 'Natural Earth (public domain)';
+  const credit = opts.credit !== false ? `<desc>Made with Map Stylizer. Reference data: ${source}.</desc>` : '';
   return `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="${outWidth}" height="${outHeight}" viewBox="${fmt(frame.x)} ${fmt(frame.y)} ${fmt(frame.w)} ${fmt(frame.h)}">${credit}<defs>${defs.join('')}<clipPath id="frame"><rect x="${fmt(frame.x)}" y="${fmt(frame.y)}" width="${fmt(frame.w)}" height="${fmt(frame.h)}"/></clipPath></defs><g id="map" clip-path="url(#frame)">${parts.join('')}</g></svg>`;
+}
+
+// City and town maps: OpenStreetMap water, parks, roads and street names.
+// Each road class is one path with a casing underneath, which keeps the SVG
+// small and makes "draw on" animations per class easy.
+function cityParts(layers, style, { s, frame, show, opts, line, L }) {
+  const c = { ...cityDefaults(style), ...(style.city || {}) };
+  const o = layers.osm;
+  const out = [];
+  out.push(group('land', `<rect x="${fmt(frame.x - frame.w)}" y="${fmt(frame.y - frame.h)}" width="${fmt(frame.w * 3)}" height="${fmt(frame.h * 3)}" fill="${c.land}"/>`));
+  if (style.effects?.paper) out.push(group('paper-texture', `<rect x="${fmt(frame.x)}" y="${fmt(frame.y)}" width="${fmt(frame.w)}" height="${fmt(frame.h)}" fill="#fff" filter="url(#paper)"/>`));
+  if (o.parks) out.push(group('parks', `<path d="${o.parks}" fill="${c.parks}"/>`));
+  if (o.water) out.push(group('water', `<path d="${o.water}" fill="${style.ocean}"/>`));
+  if (show.rivers && o.waterways) out.push(group('waterways', line('waterways', o.waterways, { stroke: style.ocean, width: c.waterwayWidth })));
+  if (show.buildings && o.buildings) out.push(group('buildings', `<path d="${o.buildings}" fill="${c.buildings}"/>`));
+  const glow = style.effects?.glow ? ' filter="url(#glow)"' : '';
+  const roads = [];
+  for (const cls of ['minor', 'medium', 'major']) {
+    const r = c.roads[cls];
+    const d = o.roads[cls];
+    if (!d || !r || r.width === 0) continue;
+    roads.push(group(`roads-${cls}`, (r.casing ? line(`roads-${cls}-casing`, d, { stroke: r.casing, width: r.width + 2 * (r.casingWidth ?? 1) }) : '') + line(`roads-${cls}`, d, r)));
+  }
+  if (o.roads.rail && c.rail) roads.push(group('railways', line('railways', o.roads.rail, c.rail)));
+  if (o.roads.ferry && c.ferry) roads.push(group('ferries', line('ferries', o.roads.ferry, c.ferry)));
+  out.push(group('roads', roads.join(''), glow));
+  if (show.traced && opts.traced?.length) {
+    out.push(group('traced', opts.traced.map((t, i) => `<g id="traced-${i}" data-name="${esc(t.name)}">${t.paths.map((d) => `<path d="${d}" fill="${t.fill}"/>`).join('')}</g>`).join('')));
+  }
+  if (show.labels) {
+    const unit = frame.h / 1440;
+    const placed = [];
+    const attrs = (size, weight, fontStyle) => `font-family="${esc(L.font)}" font-size="${s(size)}" font-weight="${weight}"${fontStyle && fontStyle !== 'normal' ? ` font-style="${fontStyle}"` : ''} fill="${L.fill}" stroke="${L.halo}" stroke-width="${s(L.haloWidth)}" stroke-linejoin="round" paint-order="stroke"`;
+    // Area names first so street names give way to them.
+    let areas = '';
+    if (show.countryLabels !== false) {
+      for (const p of o.places) {
+        const size = p.class === 'city' || p.class === 'town' ? L.countrySize : c.areaLabelSize;
+        const text = L.countryCase === 'upper' ? p.name.toUpperCase() : p.name;
+        const w = textWidth(text, size, L.letterSpacing) * unit;
+        const box = [p.x - w / 2, p.y - size * unit / 2, p.x + w / 2, p.y + size * unit / 2];
+        if (!inside([p.x, p.y], frame) || placed.some((b) => overlaps(b, box))) continue;
+        placed.push(box);
+        areas += `<text data-name="${esc(p.name)}" x="${fmt(p.x)}" y="${fmt(p.y)}" text-anchor="middle" dominant-baseline="middle" letter-spacing="${s(L.letterSpacing || 0)}" ${attrs(size, L.countryWeight, L.countryStyle)}>${esc(text)}</text>`;
+      }
+    }
+    let streets = '';
+    if (show.placeLabels !== false) {
+      const size = c.streetLabelSize;
+      const defsOut = [];
+      o.streetNames.slice(0, c.streetLabelLimit).forEach((n, i) => {
+        const w = textWidth(n.name, size, 0) * unit;
+        if (n.length < w * 1.15) return;
+        // Collision check on the label's middle stretch only; good enough to
+        // stop two names stacking on the same block.
+        const mid = n.points[Math.floor(n.points.length / 2)];
+        const box = [mid[0] - w / 2, mid[1] - size * unit, mid[0] + w / 2, mid[1] + size * unit];
+        if (placed.some((b) => overlaps(b, box))) return;
+        placed.push(box);
+        defsOut.push(`<path id="street-path-${i}" d="${n.d}"/>`);
+        streets += `<text id="street-${i}" data-name="${esc(n.name)}" dominant-baseline="middle" ${attrs(size, c.streetLabelWeight)}><textPath href="#street-path-${i}" startOffset="50%" text-anchor="middle">${esc(n.name)}</textPath></text>`;
+      });
+      streets = defsOut.length ? `<defs>${defsOut.join('')}</defs>${streets}` : '';
+    }
+    out.push(group('labels', group('area-labels', areas) + group('street-labels', streets)));
+  }
+  return out.join('');
+}
+
+// Street colours derived from a style's own palette, so a preset without a
+// "city" block still gives a sensible street map.
+function cityDefaults(style) {
+  return {
+    land: style.land.palette?.[0] || style.land.fill,
+    parks: style.land.palette?.[1] || style.land.fade,
+    buildings: style.land.fade,
+    waterwayWidth: 3,
+    roads: {
+      minor: { stroke: style.land.fill, width: 2.5, casing: style.provinceLines.stroke, casingWidth: 0.6 },
+      medium: { stroke: '#ffffff', width: 4.5, casing: style.borders.stroke, casingWidth: 0.8 },
+      major: { stroke: style.land.highlight, width: 6, casing: style.borders.stroke, casingWidth: 1 }
+    },
+    rail: { stroke: style.borders.stroke, width: 2, dash: '8 5' },
+    ferry: { stroke: style.coastline.stroke, width: 1.5, dash: '6 6' },
+    streetLabelSize: 15,
+    streetLabelWeight: 600,
+    streetLabelLimit: 120,
+    areaLabelSize: 20
+  };
 }
 
 // Labels biggest countries first and skips any label that would not fit

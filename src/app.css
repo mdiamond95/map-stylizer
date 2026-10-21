@@ -184,3 +184,16 @@ main { flex: 1; min-height: 0; position: relative; }
   .project-name { max-width: none; flex: 1; }
 }
 .viewer-empty[hidden] { display: none; }
+
+/* streets */
+.basemap { margin-bottom: 8px; }
+.basemap button { min-height: 34px; font-size: 13px; }
+#place-results li.note { color: var(--ink-2); font-size: 13px; cursor: default; }
+.ov-water { fill: #0b7bd122; stroke: var(--ov-coast); stroke-width: 1.5; }
+.ck-water { fill: #00a3c433; stroke: #0b7bd1; stroke-width: 1.2; }
+.ck-park { fill: #2f9e5b33; stroke: none; }
+.ck-building { fill: #0000001f; stroke: none; }
+.ck-road-minor { fill: none; stroke: #e0245e; stroke-width: 0.8; opacity: 0.6; }
+.ck-road { fill: none; stroke: #e0245e; stroke-width: 1.4; }
+.ck-road-major { fill: none; stroke: #e0245e; stroke-width: 2.4; }
+.ck-rail { fill: none; stroke: #333; stroke-width: 1.4; stroke-dasharray: 5 3; }

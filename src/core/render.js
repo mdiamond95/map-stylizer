@@ -87,6 +87,7 @@ export function buildPixelLayers(ref, model, width, height, options = {}) {
 
   return {
     width, height,
+    osm: o.osm ? buildOsmLayers(o.osm, path, point, width, height) : null,
     countries,
     provinces,
     borders: path(ref.borders) || '',
@@ -95,4 +96,54 @@ export function buildPixelLayers(ref, model, width, height, options = {}) {
     lakes, rivers, places,
     graticule: path(ref.graticule) || ''
   };
+}
+
+// City-scale layers from OpenStreetMap, merged into one path per class so the
+// SVG stays light enough for After Effects.
+function buildOsmLayers(osm, path, point, width, height) {
+  const fc = (features) => ({ type: 'FeatureCollection', features });
+  const roads = {};
+  for (const cls of ['major', 'medium', 'minor', 'rail', 'ferry']) roads[cls] = path(fc(osm.roads.filter((r) => r.properties.class === cls))) || '';
+  const onImage = (p) => p && p[0] >= 0 && p[0] <= width && p[1] >= 0 && p[1] <= height;
+  const places = [];
+  const seen = new Set();
+  for (const f of osm.places) {
+    const xy = point(f.geometry.coordinates);
+    if (!onImage(xy) || seen.has(f.properties.name)) continue;
+    seen.add(f.properties.name);
+    places.push({ name: f.properties.name, class: f.properties.class, x: xy[0], y: xy[1] });
+  }
+  return {
+    water: path(fc(osm.water)) || '',
+    waterways: path(fc(osm.waterways)) || '',
+    parks: path(fc(osm.parks)) || '',
+    buildings: path(fc(osm.buildings)) || '',
+    roads,
+    streetNames: streetNameCandidates(osm.names, point, onImage),
+    places
+  };
+}
+
+// The longest on-image piece of each named street, running left to right so
+// its label reads the right way up.
+function streetNameCandidates(names, point, onImage) {
+  const best = new Map();
+  for (const f of names) {
+    const lines = f.geometry.type === 'LineString' ? [f.geometry.coordinates] : f.geometry.type === 'MultiLineString' ? f.geometry.coordinates : [];
+    for (const line of lines) {
+      let pts = line.map(point).filter(Boolean);
+      if (pts.length < 2 || !pts.every(onImage)) continue;
+      let length = 0;
+      for (let i = 1; i < pts.length; i++) length += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+      if (pts[pts.length - 1][0] < pts[0][0]) pts = pts.reverse();
+      const prev = best.get(f.properties.name);
+      if (!prev || prev.length < length) {
+        best.set(f.properties.name, { name: f.properties.name, class: f.properties.class, length, points: pts });
+      }
+    }
+  }
+  const rank = { major: 0, medium: 1, minor: 2 };
+  return [...best.values()]
+    .sort((a, b) => rank[a.class] - rank[b.class] || b.length - a.length)
+    .map((c) => ({ ...c, d: 'M' + c.points.map((p) => `${Math.round(p[0] * 10) / 10},${Math.round(p[1] * 10) / 10}`).join('L') }));
 }

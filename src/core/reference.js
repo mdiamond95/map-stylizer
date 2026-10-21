@@ -72,7 +72,7 @@ export function searchPlaces(ref, query, limit = 8) {
 
 // d3 reads ring direction to tell inside from outside; a ring wound the
 // wrong way becomes "the whole world except this lake" and floods the map.
-function fixWinding(f) {
+export function fixWinding(f) {
   const g = f.geometry;
   if (!g || (g.type !== 'Polygon' && g.type !== 'MultiPolygon')) return f;
   const polys = g.type === 'Polygon' ? [g.coordinates] : g.coordinates;

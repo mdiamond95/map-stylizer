@@ -34,9 +34,12 @@
       <div class="pin-side">
         <div id="pin-map" class="pane map"></div>
         <div class="panel">
+          <div id="basemap" class="seg basemap" role="group" aria-label="Reference map">
+            <button data-mode="streets">Streets</button><button data-mode="simple">Simple (offline)</button>
+          </div>
           <p id="pin-hint" class="hint">Open a map image, then tap a spot on it and the same spot on the reference map. Cities snap exactly.</p>
           <div class="search">
-            <input id="place-search" type="search" placeholder="Search a city or country to place the point" autocomplete="off">
+            <input id="place-search" type="search" placeholder="Search a city, street or landmark to place the point" autocomplete="off">
             <ul id="place-results"></ul>
           </div>
           <div class="fit">

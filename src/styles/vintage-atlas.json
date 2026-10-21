@@ -3,14 +3,118 @@
   "name": "Vintage atlas",
   "note": "Paper tones, sepia ink, serif italic labels, soft coastal shading.",
   "ocean": "#d9cfb4",
-  "land": { "fill": "#efe3c4", "palette": ["#eedcb3", "#e5d5b0", "#f0dfc0", "#e9d2a9", "#efe6c8", "#e2d1a4", "#ecd9b6"], "highlight": "#b5523b", "fade": "#e6dcc3" },
-  "lakes": { "fill": "#cdc2a3", "stroke": "#6b5a3e", "width": 1 },
-  "rivers": { "stroke": "#6b5a3e", "width": 1.2 },
-  "coastline": { "stroke": "#4a3b26", "width": 1.8, "halo": { "stroke": "#a89670", "width": 10, "opacity": 0.45 } },
-  "borders": { "stroke": "#7a2e1f", "width": 1.8, "dash": "10 4 2 4" },
-  "provinceLines": { "stroke": "#8c7a58", "width": 1, "dash": "3 4" },
-  "graticule": { "stroke": "#6b5a3e", "width": 0.8, "opacity": 0.35, "show": true },
-  "places": { "fill": "#3a2c1a", "stroke": "#efe3c4", "radius": 4.5, "capitalShape": "star" },
-  "labels": { "font": "'Libre Caslon Text', 'Georgia', 'Times New Roman', serif", "fill": "#3a2c1a", "halo": "#efe3c4", "haloWidth": 3, "countrySize": 28, "countryWeight": 400, "countryCase": "upper", "letterSpacing": 6, "countryStyle": "normal", "placeSize": 20, "placeWeight": 400, "placeStyle": "italic" },
-  "effects": { "paper": { "colour": "#8b6b3d", "opacity": 0.18 } }
+  "land": {
+    "fill": "#efe3c4",
+    "palette": [
+      "#eedcb3",
+      "#e5d5b0",
+      "#f0dfc0",
+      "#e9d2a9",
+      "#efe6c8",
+      "#e2d1a4",
+      "#ecd9b6"
+    ],
+    "highlight": "#b5523b",
+    "fade": "#e6dcc3"
+  },
+  "lakes": {
+    "fill": "#cdc2a3",
+    "stroke": "#6b5a3e",
+    "width": 1
+  },
+  "rivers": {
+    "stroke": "#6b5a3e",
+    "width": 1.2
+  },
+  "coastline": {
+    "stroke": "#4a3b26",
+    "width": 1.8,
+    "halo": {
+      "stroke": "#a89670",
+      "width": 10,
+      "opacity": 0.45
+    }
+  },
+  "borders": {
+    "stroke": "#7a2e1f",
+    "width": 1.8,
+    "dash": "10 4 2 4"
+  },
+  "provinceLines": {
+    "stroke": "#8c7a58",
+    "width": 1,
+    "dash": "3 4"
+  },
+  "graticule": {
+    "stroke": "#6b5a3e",
+    "width": 0.8,
+    "opacity": 0.35,
+    "show": true
+  },
+  "places": {
+    "fill": "#3a2c1a",
+    "stroke": "#efe3c4",
+    "radius": 4.5,
+    "capitalShape": "star"
+  },
+  "labels": {
+    "font": "'Libre Caslon Text', 'Georgia', 'Times New Roman', serif",
+    "fill": "#3a2c1a",
+    "halo": "#efe3c4",
+    "haloWidth": 3,
+    "countrySize": 28,
+    "countryWeight": 400,
+    "countryCase": "upper",
+    "letterSpacing": 6,
+    "countryStyle": "normal",
+    "placeSize": 20,
+    "placeWeight": 400,
+    "placeStyle": "italic"
+  },
+  "effects": {
+    "paper": {
+      "colour": "#8b6b3d",
+      "opacity": 0.18
+    }
+  },
+  "city": {
+    "land": "#efe3c4",
+    "parks": "#e0d4a6",
+    "buildings": "#e2d2aa",
+    "waterwayWidth": 3,
+    "roads": {
+      "minor": {
+        "stroke": "#f3e8cc",
+        "width": 2.5,
+        "casing": "#8c7a58",
+        "casingWidth": 0.6
+      },
+      "medium": {
+        "stroke": "#f6ecd2",
+        "width": 4,
+        "casing": "#4a3b26",
+        "casingWidth": 0.8
+      },
+      "major": {
+        "stroke": "#e8c79c",
+        "width": 5.5,
+        "casing": "#4a3b26",
+        "casingWidth": 1
+      }
+    },
+    "rail": {
+      "stroke": "#4a3b26",
+      "width": 2.5,
+      "dash": "2 4"
+    },
+    "ferry": {
+      "stroke": "#6b5a3e",
+      "width": 1.2,
+      "dash": "5 5"
+    },
+    "streetLabelSize": 14,
+    "streetLabelWeight": 400,
+    "streetLabelLimit": 120,
+    "areaLabelSize": 20
+  }
 }

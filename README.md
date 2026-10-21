@@ -8,8 +8,9 @@ Runs entirely in the browser, including Safari on iPad. Nothing to install.
 ## How it works
 
 Instead of guessing lines from pixels, the tool works out where on Earth your map is,
-then pulls the matching geometry from clean reference data (Natural Earth). Only things the
-reference data does not have, like a shaded empire or a drawn route, are traced from the image.
+then pulls the matching geometry from clean reference data: Natural Earth for world and country
+maps, OpenStreetMap for city and town maps. Only things the reference data does not have, like a
+shaded empire or a drawn route, are traced from the image.
 
 1. **Pin.** Open a map image. Tap a spot on it, then the same spot on the reference map
    (or search a city; cities snap to their exact position). Four or more points spread
@@ -27,6 +28,18 @@ reference data does not have, like a shaded empire or a drawn route, are traced 
 
 Projects autosave in the browser. **Save project** writes a `.mapstyle.json` file (image included)
 that you can keep in this repo or the Files app and open again on any device.
+
+## City and town maps
+
+When the pinned map covers less than about 60 km, the **Streets** detail level is chosen
+automatically: roads (by class), railways, water, parks, buildings, neighbourhood names and
+street names come from OpenStreetMap via [OpenFreeMap](https://openfreemap.org)'s free vector
+tiles. The reference map shows streets too, and the search box finds streets, landmarks and
+addresses (OpenStreetMap Nominatim), so you can pin street corners. Both need a connection;
+the **Simple** reference map works offline. Exports credit © OpenStreetMap contributors.
+
+Old city maps are rarely true to scale. If the points disagree, set **Fit** to **Rubber sheet**
+and add more points, especially near the edges.
 
 ## Fit options
 
@@ -67,5 +80,7 @@ Styles are small JSON files in `src/styles/`; reference data is rebuilt with `to
 - [VTracer](https://github.com/visioncortex/vtracer) via `vtracer-wasm` for colour tracing (MIT)
 - [TopoJSON](https://github.com/topojson/topojson-client) (ISC), and mapshaper (MPL-2.0, build time only)
 - [Natural Earth](https://www.naturalearthdata.com) vector data (public domain)
+- [OpenStreetMap](https://www.openstreetmap.org/copyright) data (ODbL) via [OpenFreeMap](https://openfreemap.org) tiles and Nominatim search
+- `@mapbox/vector-tile` and `pbf` for reading tiles (BSD-3-Clause)
 
 No GPL code is included.

@@ -3,14 +3,111 @@
   "name": "Clean explainer",
   "note": "Flat colours, thick borders, bold sans-serif labels. The Clear As Mud default.",
   "ocean": "#bfe1ef",
-  "land": { "fill": "#f3eee3", "palette": ["#f6e7c1", "#d9ead3", "#f4d6c6", "#dcdff2", "#f3e1ea", "#e3efd9", "#efe0cc"], "highlight": "#e4572e", "fade": "#e6e3dc" },
-  "lakes": { "fill": "#bfe1ef", "stroke": "#7fb6cf", "width": 1 },
-  "rivers": { "stroke": "#7fb6cf", "width": 1.6 },
-  "coastline": { "stroke": "#4f7f99", "width": 2.2 },
-  "borders": { "stroke": "#3b3b3b", "width": 3 },
-  "provinceLines": { "stroke": "#8a8577", "width": 1.4, "dash": "6 5" },
-  "graticule": { "stroke": "#ffffff", "width": 1, "opacity": 0.5 },
-  "places": { "fill": "#222222", "stroke": "#ffffff", "radius": 6, "capitalShape": "square" },
-  "labels": { "font": "'Inter', 'Helvetica Neue', Arial, sans-serif", "fill": "#1f1f1f", "halo": "#ffffff", "haloWidth": 5, "countrySize": 30, "countryWeight": 800, "countryCase": "upper", "letterSpacing": 1.5, "placeSize": 22, "placeWeight": 600 },
-  "effects": { "landShadow": { "dx": 0, "dy": 4, "blur": 6, "colour": "#00000033" } }
+  "land": {
+    "fill": "#f3eee3",
+    "palette": [
+      "#f6e7c1",
+      "#d9ead3",
+      "#f4d6c6",
+      "#dcdff2",
+      "#f3e1ea",
+      "#e3efd9",
+      "#efe0cc"
+    ],
+    "highlight": "#e4572e",
+    "fade": "#e6e3dc"
+  },
+  "lakes": {
+    "fill": "#bfe1ef",
+    "stroke": "#7fb6cf",
+    "width": 1
+  },
+  "rivers": {
+    "stroke": "#7fb6cf",
+    "width": 1.6
+  },
+  "coastline": {
+    "stroke": "#4f7f99",
+    "width": 2.2
+  },
+  "borders": {
+    "stroke": "#3b3b3b",
+    "width": 3
+  },
+  "provinceLines": {
+    "stroke": "#8a8577",
+    "width": 1.4,
+    "dash": "6 5"
+  },
+  "graticule": {
+    "stroke": "#ffffff",
+    "width": 1,
+    "opacity": 0.5
+  },
+  "places": {
+    "fill": "#222222",
+    "stroke": "#ffffff",
+    "radius": 6,
+    "capitalShape": "square"
+  },
+  "labels": {
+    "font": "'Inter', 'Helvetica Neue', Arial, sans-serif",
+    "fill": "#1f1f1f",
+    "halo": "#ffffff",
+    "haloWidth": 5,
+    "countrySize": 30,
+    "countryWeight": 800,
+    "countryCase": "upper",
+    "letterSpacing": 1.5,
+    "placeSize": 22,
+    "placeWeight": 600
+  },
+  "effects": {
+    "landShadow": {
+      "dx": 0,
+      "dy": 4,
+      "blur": 6,
+      "colour": "#00000033"
+    }
+  },
+  "city": {
+    "land": "#f6f1e6",
+    "parks": "#d6e9c6",
+    "buildings": "#e8e0d0",
+    "waterwayWidth": 3,
+    "roads": {
+      "minor": {
+        "stroke": "#ffffff",
+        "width": 2.5,
+        "casing": "#cfc6b4",
+        "casingWidth": 0.7
+      },
+      "medium": {
+        "stroke": "#ffffff",
+        "width": 4.5,
+        "casing": "#b0a48c",
+        "casingWidth": 0.9
+      },
+      "major": {
+        "stroke": "#f2c14e",
+        "width": 6.5,
+        "casing": "#9c7b2f",
+        "casingWidth": 1
+      }
+    },
+    "rail": {
+      "stroke": "#555555",
+      "width": 2,
+      "dash": "8 5"
+    },
+    "ferry": {
+      "stroke": "#4f7f99",
+      "width": 1.5,
+      "dash": "6 6"
+    },
+    "streetLabelSize": 15,
+    "streetLabelWeight": 600,
+    "streetLabelLimit": 120,
+    "areaLabelSize": 22
+  }
 }
