@@ -668,7 +668,7 @@ function syncLinesMethod() {
   const ink = $('#lines-method').value === 'ink';
   $('#lines-method-hint').textContent = ink
     ? 'Ink only follows the printed ink. Each ink colour becomes its own layer. Quicker, but lettering that touches lines can stay.'
-    : 'Combined runs several methods and keeps the lines they agree on: block outlines, the shoreline from the water colour, and the ink with street names painted out. Lines only one method found go in “Unsure lines”, hidden at first. Takes about half a minute.';
+    : 'Combined runs several methods and keeps the lines they agree on: block outlines, the shoreline and piers from the water colour, and the ink with street names painted out. Railways and dashed lines (paths, boundaries) get layers of their own. Doubtful lines go in “Unsure lines”, hidden at first. Takes about 40 seconds.';
 }
 $('#lines-method').addEventListener('change', syncLinesMethod);
 function renderLines() {

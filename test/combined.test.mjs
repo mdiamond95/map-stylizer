@@ -36,6 +36,16 @@ for (let by = 0; by < 5; by++) for (let bx = 0; bx < 6; bx++) {
     for (let x = lx; x <= lx + 7; x++) { put(x, y0 + 5, ink); if (n % 2) put(x, y0 + 10, ink); }
   }
 }
+// Two piers sticking out into the harbour with a narrow slip between them.
+for (const [y0, y1] of [[300, 312], [320, 332]]) {
+  for (let y = y0; y <= y1; y++) for (let x = 960; x <= 1100; x++) put(x, y, y === y0 || y === y1 || x === 1100 ? ink : [232, 226, 212]);
+}
+// A railway (a heavy band with cross ticks) and a dashed path below the blocks.
+for (let x = 60; x < 900; x++) {
+  for (let d = -2; d <= 2; d++) put(x, 790 + d, ink);
+  if (x % 4 === 0) for (let d = -4; d <= 4; d++) put(x, 790 + d, ink);
+}
+for (let x = 60; x < 900; x += 12) for (let t = 0; t < 7; t++) put(x + t, 830, ink);
 // A red grid line across everything.
 for (let x = 0; x < 960; x++) for (let d = 0; d < 2; d++) put(x, 500 + d, red);
 
@@ -45,6 +55,7 @@ console.log(`combined (${Date.now() - t} ms):`, layers.map((l) => `${l.name} ${M
 const byName = (re) => layers.find((l) => re.test(l.name));
 const pts = (l) => (l?.d.match(/-?[\d.]+,-?[\d.]+/g) || []).map((p) => p.split(',').map(Number));
 const edges = byName(/^Street and block edges$/), shore = byName(/^Water edge$/), grid = byName(/Red/);
+const rail = byName(/^Railways$/), dashes = byName(/^Dashed lines$/);
 assert.ok(edges, 'street and block edges layer');
 assert.ok(shore, 'water edge from the harbour colour');
 assert.ok(grid, 'red grid as its own layer');
@@ -61,7 +72,16 @@ assert.ok(edges.length > drawn * 0.9 && edges.length < drawn * 1.15, `edge lengt
 // No line runs through the lettering, away from the block edge it sits on.
 const inLetters = e.filter(([x, y]) => letters.some(([x0, y0, x1, y1]) => x > x0 && x < x1 && y > y0 && y < y1)).length;
 assert.equal(inLetters, 0, 'lettering left out');
-// The shoreline runs down the harbour edge.
+// The shoreline runs down the harbour edge, and the piers' outlines into the slip.
 const s = pts(shore);
-assert.ok(s.length && s.every(([x]) => Math.abs(x - 960) < 6), 'shore follows the water edge');
-console.log('combined: blocks square, lettering out, shore and grid kept');
+const atPiers = ([, y]) => y > 290 && y < 342;
+assert.ok(s.length && s.filter((p) => !atPiers(p)).every(([x]) => Math.abs(x - 960) < 6), 'shore follows the water edge');
+// (A pier drawn as an outlined patch of paper may come out as a block instead.)
+assert.ok(s.concat(e).filter(([x, y]) => x > 1090 && y > 308 && y < 324).length >= 2, 'outline runs into the slip between the piers');
+// The railway is one line down the band, not in the street edges.
+const rl = pts(rail);
+assert.ok(rail && rl.every(([, y]) => Math.abs(y - 790) < 4) && rail.length > 840 * 0.8, `railway found (${Math.round(rail?.length || 0)} px)`);
+assert.ok(!e.some(([x, y]) => x > 100 && x < 860 && Math.abs(y - 790) < 8), 'railway kept out of the street edges');
+// The dashes are joined into one dashed line.
+assert.ok(dashes && pts(dashes).every(([, y]) => Math.abs(y - 830) < 3) && dashes.length > 840 * 0.8, `dashed line found (${Math.round(dashes?.length || 0)} px)`);
+console.log('combined: blocks square, lettering out, shore, piers, railway, dashes and grid kept');
