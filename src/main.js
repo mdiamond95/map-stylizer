@@ -6,6 +6,7 @@ import { makePixelPath, buildPixelLayers } from './core/render.js';
 import { loadOsm, makeTileFetcher, OSM_ATTRIBUTION } from './core/osm.js';
 import { buildSvg, buildLineworkSvg } from './core/svg.js';
 import { makeInkImage, matchSettings } from './core/match.js';
+import { parsePath, toPathData, lineLength, eraseCircle, nearestLine } from './core/linesedit.js';
 import { STYLES } from './styles/index.js';
 import { ImageViewer } from './ui/viewer.js';
 import { RefMap } from './ui/refmap.js';
@@ -77,7 +78,9 @@ async function getRef(detail) {
 
 // ---------- views ----------
 const pinViewer = new ImageViewer($('#pin-image'), { onTap: onPinImageTap, onPinMove: (id, xy) => updatePin(id, { pixel: xy }) });
-const checkViewer = new ImageViewer($('#check-image'), { onTap: onCheckTap });
+// Hand tidying state for the scan lines (see "tidying the scan lines").
+const tidy = { on: false, lines: null, undo: [], before: null, frame: 0 };
+const checkViewer = new ImageViewer($('#check-image'), { onTap: onCheckTap, onDraw: onLinesDraw });
 const refMap = new RefMap($('#pin-map'), {
   onTap: onMapTap,
   onBasemap: (mode, problem) => { if (problem) toast(problem); syncBasemap(); },
@@ -434,6 +437,7 @@ function syncControls() {
   $('#lines-contrast').value = project.linework?.options?.contrast ?? 0.18;
   $('#lines-size').value = project.linework?.options?.minSize ?? 0.012;
   $('#lines-peel').checked = project.linework?.options?.peel ?? true;
+  resetTidy();
   renderLines();
   syncDrawMode();
 }
@@ -529,6 +533,7 @@ async function refreshCheck() {
 }
 
 function onCheckTap(xy, info) {
+  if (tidy.on) { if (xy) tidyTap(xy); return; }
   if (picking && xy && imageEl) {
     pickedColour = sampleColour(imageEl, xy[0], xy[1]);
     picking = false;
@@ -631,6 +636,7 @@ $('#lines-run').addEventListener('click', () => {
     };
     if (!model) project.draw = 'scan';
     else if (project.draw === 'reference') project.draw = 'both';
+    resetTidy();
     syncDrawMode(); renderLines(); refreshCheck(); save();
     toast(project.linework.layers.length ? `Found ${project.linework.layers.length} line ${project.linework.layers.length === 1 ? 'colour' : 'colours'}. Slide “Map image” down to see them, and untick any you don't want.` : 'No lines found. Move “Faint lines” to the left and try again.', 5000);
   };
@@ -642,12 +648,95 @@ function renderLines() {
   ul.innerHTML = layers.map((l, i) => `<li><input type="color" value="${l.colour}" data-i="${i}"><label><input type="checkbox" data-show="${i}" ${l.show !== false ? 'checked' : ''}> ${esc(l.name)} <small>${Math.round(l.length).toLocaleString()} px</small></label><button data-del="${i}" aria-label="Delete">✕</button></li>`).join('');
   ul.querySelectorAll('input[type=color]').forEach((inp) => inp.addEventListener('change', () => { project.linework.layers[+inp.dataset.i].colour = inp.value; refreshCheck(); save(); }));
   ul.querySelectorAll('[data-show]').forEach((inp) => inp.addEventListener('change', () => { project.linework.layers[+inp.dataset.show].show = inp.checked; refreshCheck(); save(); }));
+  $('#lines-tidy-box').hidden = !layers.length;
+  if (!layers.length && tidy.on) setTidy(false);
   ul.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', () => {
     project.linework.layers.splice(+b.dataset.del, 1);
+    resetTidy();
     if (!project.linework.layers.length) { project.linework = null; if (project.draw !== 'reference') project.draw = 'reference'; syncDrawMode(); }
     renderLines(); refreshCheck(); save();
   }));
 }
+// ---------- tidying the scan lines by hand ----------
+// Tap a leftover squiggle to delete that line; drag to rub out bits of line.
+// Edits work on the lines parsed once per session and are written back to
+// the layers' path data, with an undo history.
+function resetTidy() { tidy.lines = null; tidy.undo = []; $('#lines-undo').disabled = true; }
+function tidyLines() {
+  if (!tidy.lines) tidy.lines = project.linework.layers.map((l) => parsePath(l.d));
+  return tidy.lines;
+}
+function setTidy(on) {
+  tidy.on = on;
+  $('#lines-tidy').classList.toggle('active', on);
+  $('#lines-tidy').textContent = on ? 'Done' : 'Tidy by hand';
+  $('#lines-tidy-help').hidden = !on;
+  $('#check-image').classList.toggle('drawing', on);
+  checkViewer.setDrawMode(on, +$('#lines-eraser').value);
+  if (on && imageEl && +$('#image-opacity').value > 0.6) { $('#image-opacity').value = 0.35; checkViewer.setImageOpacity(0.35); }
+}
+// Screen pixels to image pixels at the current zoom.
+function screenToImage(px) { return px / checkViewer.t.k; }
+function writeBack(layerIndexes) {
+  for (const i of layerIndexes) {
+    const l = project.linework.layers[i], lines = tidy.lines[i];
+    l.d = toPathData(lines);
+    l.count = lines.length;
+    l.length = lines.reduce((s, q) => s + lineLength(q), 0);
+  }
+}
+function snapshot() { return tidyLines().map((ls) => ls.slice()); }
+function pushUndo(before) {
+  tidy.undo.push(before);
+  if (tidy.undo.length > 30) tidy.undo.shift();
+  $('#lines-undo').disabled = false;
+}
+function visibleLayers() { return tidyLines().map((ls, i) => (project.linework.layers[i].show === false ? [] : ls)); }
+function tidyTap(xy) {
+  const hit = nearestLine(visibleLayers(), xy, screenToImage(14));
+  if (!hit) { toast('No line there. Zoom in and tap right on the squiggle.'); return; }
+  pushUndo(snapshot());
+  tidy.lines[hit.layer] = tidy.lines[hit.layer].filter((_, i) => i !== hit.index);
+  writeBack([hit.layer]);
+  renderLines(); refreshCheck(); save();
+}
+function onLinesDraw(phase, xy) {
+  if (!tidy.on || !hasLines()) return;
+  if (phase === 'start') { tidy.before = snapshot(); tidy.last = null; }
+  if ((phase === 'start' || phase === 'move') && tidy.before) {
+    const r = screenToImage(+$('#lines-eraser').value / 2);
+    // Fill in between pointer events so a quick stroke leaves no gaps.
+    const from = tidy.last || xy;
+    const steps = Math.max(1, Math.ceil(Math.hypot(xy[0] - from[0], xy[1] - from[1]) / (r * 0.5)));
+    for (let k = 1; k <= steps; k++) {
+      const p = [from[0] + (xy[0] - from[0]) * k / steps, from[1] + (xy[1] - from[1]) * k / steps];
+      tidy.lines.forEach((ls, i) => { if (project.linework.layers[i].show !== false) tidy.lines[i] = eraseCircle(ls, p, r, screenToImage(3)); });
+    }
+    tidy.last = xy;
+    if (!tidy.frame) tidy.frame = requestAnimationFrame(() => { tidy.frame = 0; writeBack(tidy.lines.map((_, i) => i)); refreshCheck(); });
+  }
+  if (phase === 'cancel' && tidy.before) {
+    tidy.lines = tidy.before; tidy.before = null;
+    writeBack(tidy.lines.map((_, i) => i)); refreshCheck();
+  }
+  if (phase === 'end' && tidy.before) {
+    const changed = tidy.before.some((ls, i) => ls.length !== tidy.lines[i].length || ls.some((l, j) => l !== tidy.lines[i][j]));
+    if (changed) pushUndo(tidy.before);
+    tidy.before = null;
+    writeBack(tidy.lines.map((_, i) => i)); renderLines(); refreshCheck(); save();
+  }
+}
+$('#lines-tidy').addEventListener('click', () => setTidy(!tidy.on));
+$('#lines-eraser').addEventListener('input', (e) => checkViewer.setDrawMode(tidy.on, +e.target.value));
+$('#lines-undo').addEventListener('click', () => {
+  const prev = tidy.undo.pop();
+  if (!prev) return;
+  tidy.lines = prev;
+  writeBack(prev.map((_, i) => i));
+  $('#lines-undo').disabled = !tidy.undo.length;
+  renderLines(); refreshCheck(); save();
+});
+
 function syncDrawMode() {
   if (!model && hasLines()) project.draw = 'scan';
   if (!hasLines()) project.draw = 'reference';

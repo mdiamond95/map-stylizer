@@ -1,18 +1,23 @@
 // Pan and zoom image viewer with an SVG overlay in image pixel space.
 // Works with touch (one finger pans, two pinch), Apple Pencil, mouse and trackpad.
+// In draw mode one finger draws instead (onDraw), and two still pan and pinch.
 
 export class ImageViewer {
-  constructor(el, { onTap, onPinMove } = {}) {
+  constructor(el, { onTap, onPinMove, onDraw } = {}) {
     this.el = el;
     this.onTap = onTap;
     this.onPinMove = onPinMove;
+    this.onDraw = onDraw;
+    this.drawMode = false;
+    this.brushSize = 0;
     el.classList.add('viewer');
-    el.innerHTML = `<div class="stage"><img alt="" draggable="false"><svg class="overlay" xmlns="http://www.w3.org/2000/svg"></svg></div><div class="pins"></div><div class="viewer-empty">Open a map image to start</div>`;
+    el.innerHTML = `<div class="stage"><img alt="" draggable="false"><svg class="overlay" xmlns="http://www.w3.org/2000/svg"></svg></div><div class="pins"></div><div class="brush" hidden></div><div class="viewer-empty">Open a map image to start</div>`;
     this.stage = el.querySelector('.stage');
     this.img = el.querySelector('img');
     this.overlay = el.querySelector('svg');
     this.pinLayer = el.querySelector('.pins');
     this.empty = el.querySelector('.viewer-empty');
+    this.brush = el.querySelector('.brush');
     this.t = { x: 0, y: 0, k: 1 };
     this.pins = [];
     this.pointers = new Map();
@@ -31,6 +36,22 @@ export class ImageViewer {
     this.empty.hidden = !!src;
     this.userMoved = false;
     this.fit();
+  }
+
+  // Draw mode, with a round brush outline of `size` screen pixels (0 for none).
+  setDrawMode(on, size = 0) {
+    this.drawMode = on;
+    this.brushSize = size;
+    this.brush.style.width = this.brush.style.height = `${size}px`;
+    if (!on) this.brush.hidden = true;
+  }
+
+  showBrush(clientX, clientY) {
+    if (!this.drawMode || !this.brushSize) return;
+    const r = this.el.getBoundingClientRect();
+    this.brush.style.left = `${clientX - r.left}px`;
+    this.brush.style.top = `${clientY - r.top}px`;
+    this.brush.hidden = false;
   }
 
   setImageOpacity(v) { this.img.style.opacity = v; }
@@ -94,14 +115,20 @@ export class ImageViewer {
         dragPin = { id: pinEl.dataset.id, moved: false };
         return;
       }
-      if (this.pointers.size === 1) start = { x: e.clientX, y: e.clientY, tx: this.t.x, ty: this.t.y, moved: false, target: e.target };
+      if (this.pointers.size === 1) {
+        start = { x: e.clientX, y: e.clientY, tx: this.t.x, ty: this.t.y, moved: false, target: e.target, draw: this.drawMode && !!this.onDraw };
+        this.showBrush(e.clientX, e.clientY);
+      }
       if (this.pointers.size === 2) {
+        // A second finger means pan and pinch, not drawing.
+        if (start?.draw && start.moved) this.onDraw('cancel');
         const [a, b] = [...this.pointers.values()];
         pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), cx: (a.x + b.x) / 2, cy: (a.y + b.y) / 2, k: this.t.k, tx: this.t.x, ty: this.t.y };
         start = null;
       }
     });
     el.addEventListener('pointermove', (e) => {
+      if (this.pointers.size < 2) this.showBrush(e.clientX, e.clientY);
       if (!this.pointers.has(e.pointerId)) return;
       this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (dragPin) {
@@ -121,6 +148,12 @@ export class ImageViewer {
         this.t = { k, x: cx - (ox - pinch.tx) * f, y: cy - (oy - pinch.ty) * f };
         this.userMoved = true;
         this.apply();
+      } else if (start?.draw) {
+        if (!start.moved && Math.hypot(e.clientX - start.x, e.clientY - start.y) > 4) {
+          start.moved = true;
+          this.onDraw('start', this.toImage(start.x, start.y));
+        }
+        if (start.moved) this.onDraw('move', this.toImage(e.clientX, e.clientY));
       } else if (start) {
         const dx = e.clientX - start.x, dy = e.clientY - start.y;
         if (Math.hypot(dx, dy) > 6) start.moved = true;
@@ -139,6 +172,8 @@ export class ImageViewer {
         dragPin = null;
         return;
       }
+      if (start?.draw && start.moved) this.onDraw(e.type === 'pointerup' ? 'end' : 'cancel');
+      if (e.pointerType !== 'mouse') this.brush.hidden = true;
       if (start && !start.moved && e.type === 'pointerup' && this.w) {
         this.onTap?.(this.toImage(e.clientX, e.clientY), { target: start.target });
       }
@@ -147,6 +182,7 @@ export class ImageViewer {
     };
     el.addEventListener('pointerup', end);
     el.addEventListener('pointercancel', end);
+    el.addEventListener('pointerleave', () => { if (!this.pointers.size) this.brush.hidden = true; });
     el.addEventListener('wheel', (e) => {
       e.preventDefault();
       if (e.ctrlKey || !e.deltaX) this.zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015)));

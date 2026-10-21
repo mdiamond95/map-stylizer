@@ -43,6 +43,10 @@ the lines before they are traced, so streets don't zigzag up through the letters
 fills a street completely, a stretch of the street's edge can go with it; untick the box and pull
 again if you'd rather keep those and tidy by hand.
 
+**Tidy by hand** (under the colour list) cleans up whatever is left: tap a leftover squiggle to
+delete that line, or drag one finger to rub out bits of line with the eraser. Two fingers still
+move and zoom, and **Undo** steps back. Edits are saved with the project and go into the export.
+
 ## City and town maps
 
 When the pinned map covers less than about 60 km, the **Streets** detail level is chosen

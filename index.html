@@ -74,6 +74,13 @@
           <button id="lines-run" class="primary">Pull lines from scan</button>
         </div>
         <ul id="lines-list" class="traced-list"></ul>
+        <div id="lines-tidy-box" class="tidy" hidden>
+          <div class="buttons"><button id="lines-tidy">Tidy by hand</button><button id="lines-undo" disabled>Undo</button></div>
+          <div id="lines-tidy-help" hidden>
+            <label class="row">Eraser size <input id="lines-eraser" type="range" min="6" max="60" step="2" value="20"></label>
+            <p class="hint small">Tap a leftover squiggle to delete that line. Drag one finger to rub out bits of line. Use two fingers to move and zoom. Tap Done when you're finished.</p>
+          </div>
+        </div>
         <h2>Map data</h2>
         <label class="row">Detail
           <select id="detail"></select>
