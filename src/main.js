@@ -685,6 +685,7 @@ function fmtLat(v) { return `${Math.abs(v).toFixed(2)}°${v >= 0 ? 'N' : 'S'}`; 
 function fmtLon(v) { return `${Math.abs(v).toFixed(2)}°${v >= 0 ? 'E' : 'W'}`; }
 
 // ---------- start ----------
+$('#build').textContent = __BUILD__;
 restore().then((p) => (p ? loadProject({ ...newProject(), ...p }) : (syncControls(), renderPins())));
 
 if ('serviceWorker' in navigator && import.meta.env.PROD) {

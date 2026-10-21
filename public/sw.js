@@ -1,6 +1,6 @@
 // Offline support: the app and its reference data are cached after the
 // first visit, so the tool keeps working with no connection.
-const CACHE = 'map-stylizer-v1';
+const CACHE = 'map-stylizer-v2';
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(['./', 'manifest.webmanifest', 'data/ne-medium.topojson'])).then(() => self.skipWaiting()));
