@@ -38,6 +38,11 @@ example the street drawing and a red reference grid). Untick a colour to leave i
 export**, **Draw** picks the scan lines, the map data, or both. The Layered SVG has one group per
 ink colour (`scan-lines-1`, `scan-lines-2`…), as strokes you can recolour or draw on in your editor.
 
+**Clean lettering off lines** (on by default) strips words, numbers and route shields that touch
+the lines before they are traced, so streets don't zigzag up through the letters. Where lettering
+fills a street completely, a stretch of the street's edge can go with it; untick the box and pull
+again if you'd rather keep those and tidy by hand.
+
 ## City and town maps
 
 When the pinned map covers less than about 60 km, the **Streets** detail level is chosen

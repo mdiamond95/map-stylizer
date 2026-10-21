@@ -42,3 +42,27 @@ assert.equal(below, 0, 'lettering dropped');
   }
   console.log('square corners kept');
 }
+
+// Lettering sitting on a line is cleaned off: the traced line stays straight
+// and whole instead of zigzagging up through the letters.
+{
+  const W3 = 600, H3 = 200;
+  const img = new Uint8ClampedArray(W3 * H3 * 4);
+  for (let i = 0; i < img.length; i += 4) { img[i] = 232; img[i + 1] = 226; img[i + 2] = 212; img[i + 3] = 255; }
+  const put = (x, y) => { const i = (y * W3 + x) * 4; img[i] = 60; img[i + 1] = 62; img[i + 2] = 110; };
+  for (let x = 40; x < 560; x++) for (let d = 0; d < 2; d++) put(x, 100 + d);
+  // Letter-like shapes, 12 px tall, resting on the line: boxes and Hs.
+  for (let n = 0; n < 20; n++) {
+    const x0 = 150 + n * 14;
+    for (let y = 88; y < 100; y++) { put(x0, y); put(x0 + 8, y); }
+    if (n % 2) for (let x = x0; x <= x0 + 8; x++) { put(x, 88); put(x, 94); }
+    else for (let x = x0; x <= x0 + 8; x++) put(x, 94);
+  }
+  const traced = (peel) => (extractLinework(img, W3, H3, { minSize: 0.04, peel }).layers[0]?.d.match(/[\d.]+,[\d.]+/g) || []).map((p) => p.split(',').map(Number));
+  const above = (pts) => pts.filter(([, y]) => y < 97).length;
+  const clean = traced(true);
+  console.log(`lettering on a line: ${above(traced(false))} points up in the letters without clean-up, ${above(clean)} with`);
+  assert.equal(above(clean), 0, 'letters cleaned off the line');
+  const xs = clean.map(([x]) => x);
+  assert.ok(Math.min(...xs) < 45 && Math.max(...xs) > 555, 'line kept end to end');
+}

@@ -69,7 +69,8 @@
         <div class="lines">
           <label class="row">Faint lines <input id="lines-contrast" type="range" min="0.08" max="0.35" step="0.01" value="0.18"></label>
           <label class="row">Lettering <input id="lines-size" type="range" min="0.004" max="0.03" step="0.001" value="0.012"></label>
-          <p class="hint small">Faint lines: left picks up fainter ink. Lettering: right removes bigger lettering and symbols.</p>
+          <label class="row"><input type="checkbox" id="lines-peel" checked> Clean lettering off lines</label>
+          <p class="hint small">Faint lines: left picks up fainter ink. Lettering: right removes bigger lettering and symbols. Clean lettering strips words and numbers that touch the lines; untick it if it removes lines you want.</p>
           <button id="lines-run" class="primary">Pull lines from scan</button>
         </div>
         <ul id="lines-list" class="traced-list"></ul>

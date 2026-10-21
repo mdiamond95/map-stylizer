@@ -433,6 +433,7 @@ function syncControls() {
   renderTraced();
   $('#lines-contrast').value = project.linework?.options?.contrast ?? 0.18;
   $('#lines-size').value = project.linework?.options?.minSize ?? 0.012;
+  $('#lines-peel').checked = project.linework?.options?.peel ?? true;
   renderLines();
   syncDrawMode();
 }
@@ -616,7 +617,7 @@ $('#lines-run').addEventListener('click', () => {
   g.drawImage(imageEl, 0, 0, c.width, c.height);
   const data = g.getImageData(0, 0, c.width, c.height).data;
   const id = ++linesJob;
-  const options = { contrast: +$('#lines-contrast').value, minSize: +$('#lines-size').value, outScale: 1 / scale };
+  const options = { contrast: +$('#lines-contrast').value, minSize: +$('#lines-size').value, peel: $('#lines-peel').checked, outScale: 1 / scale };
   btn.disabled = true; btn.textContent = 'Pulling lines…';
   linesWorker.onmessage = (e) => {
     if (e.data.id !== linesJob) return;
