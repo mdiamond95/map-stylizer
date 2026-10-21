@@ -625,7 +625,7 @@ $('#lines-run').addEventListener('click', () => {
     if (e.data.error) { toast(`Couldn't pull lines: ${e.data.error}`); return; }
     const old = new Map((project.linework?.layers || []).map((l) => [l.name, l]));
     project.linework = {
-      options, imageWidth: W, imageHeight: H, strokeWidth: project.linework?.strokeWidth ?? 2,
+      options, imageWidth: W, imageHeight: H, strokeWidth: 1.4,
       layers: e.data.result.layers.map((l) => ({ ...l, show: old.get(l.name)?.show ?? true }))
     };
     if (!model) project.draw = 'scan';

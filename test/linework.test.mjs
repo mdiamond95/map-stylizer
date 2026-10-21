@@ -25,3 +25,20 @@ assert.ok(dark.length > 5000 && dark.length < 6600, `street lines traced (${Math
 assert.ok(redLayer.length > 650 && redLayer.length < 800, `red line traced (${Math.round(redLayer.length)} px)`);
 const below = (dark.d.match(/[\d.]+,[\d.]+/g) || []).filter((p) => +p.split(',')[1] > 560).length;
 assert.equal(below, 0, 'lettering dropped');
+
+// A drawn block with square corners keeps them: the traced outline has a
+// vertex within 2 px of each corner, not a cut-off diagonal.
+{
+  const W2 = 300, H2 = 240;
+  const img = new Uint8ClampedArray(W2 * H2 * 4);
+  for (let i = 0; i < img.length; i += 4) { img[i] = 232; img[i + 1] = 226; img[i + 2] = 212; img[i + 3] = 255; }
+  const put = (x, y) => { const i = (y * W2 + x) * 4; img[i] = 60; img[i + 1] = 62; img[i + 2] = 110; };
+  for (let x = 50; x <= 250; x++) for (let d = -1; d <= 1; d++) { put(x, 50 + d); put(x, 190 + d); }
+  for (let y = 50; y <= 190; y++) for (let d = -1; d <= 1; d++) { put(50 + d, y); put(250 + d, y); }
+  const pts = (extractLinework(img, W2, H2).layers[0].d.match(/[\d.]+,[\d.]+/g) || []).map((p) => p.split(',').map(Number));
+  for (const [cx, cy] of [[50, 50], [250, 50], [250, 190], [50, 190]]) {
+    const near = Math.min(...pts.map(([x, y]) => Math.hypot(x - cx, y - cy)));
+    assert.ok(near < 2, `corner ${cx},${cy} kept square (nearest vertex ${near.toFixed(1)} px)`);
+  }
+  console.log('square corners kept');
+}

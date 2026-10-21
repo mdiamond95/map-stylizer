@@ -204,5 +204,5 @@ main { flex: 1; min-height: 0; position: relative; }
 .lines { display: grid; gap: 6px; }
 .lines #lines-run { width: 100%; }
 .hint.small { font-size: 12px; margin: 0; }
-.ck-lines { fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.ck-lines { fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: miter; }
 #draw-mode { margin-bottom: 10px; }

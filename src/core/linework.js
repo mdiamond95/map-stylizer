@@ -32,7 +32,11 @@ export function extractLinework(rgba, width, height, options = {}, onProgress) {
   onProgress?.('Tracing lines');
   const unit = Math.max(width, height);
   const lines = prune(traceSkeleton(mask, width, height), unit * 0.005, unit * 0.012)
-    .map((l) => simplify(l, o.simplify).map((p) => [p[0] * o.outScale, p[1] * o.outScale]));
+    .map((l) => simplify(l, o.simplify))
+    // Short zigzags with a sharp turn every few pixels are the tops of
+    // letters touching a line, not something drawn as a line.
+    .filter((l) => { const len = lineLength(l); if (len > unit * 0.03) return true; const sharp = sharpTurns(l); return !(sharp >= 3 && sharp * 12 > len); })
+    .map((l) => l.map((p) => [p[0] * o.outScale, p[1] * o.outScale]));
   onProgress?.('Sorting by colour');
   return { layers: groupByColour(lines, rgba, width, o.colours, o.outScale) };
 }
@@ -190,12 +194,24 @@ function prune(lines, spur, loop) {
   return alive.map((s) => s.l);
 }
 
-// Douglas-Peucker, then a light smoothing pass so pixel steps don't show.
+// Douglas-Peucker, then square up corners: thinning cuts a corner off at
+// about 45 degrees, so a short cut between two straight runs is replaced by
+// the point where those runs meet. Only gentle bends are smoothed, so pixel
+// steps don't show and corners stay sharp.
 function simplify(pts, tol) {
   if (pts.length < 3) return pts;
   const keep = new Uint8Array(pts.length);
   keep[0] = keep[pts.length - 1] = 1;
-  const stack = [[0, pts.length - 1]];
+  // A closed loop starts and ends on the same pixel, which gives no base
+  // line, so split it at its farthest point first.
+  let stack = [[0, pts.length - 1]];
+  const [sx, sy] = pts[0], [ex, ey] = pts[pts.length - 1];
+  if (Math.hypot(ex - sx, ey - sy) < 2) {
+    let far = 1, fd = -1;
+    for (let i = 1; i < pts.length - 1; i++) { const d = Math.hypot(pts[i][0] - sx, pts[i][1] - sy); if (d > fd) { fd = d; far = i; } }
+    keep[far] = 1;
+    stack = [[0, far], [far, pts.length - 1]];
+  }
   while (stack.length) {
     const [a, b] = stack.pop();
     const [ax, ay] = pts[a], [bx, by] = pts[b];
@@ -207,8 +223,52 @@ function simplify(pts, tol) {
     }
     if (dist > tol) { keep[worst] = 1; stack.push([a, worst], [worst, b]); }
   }
-  const out = pts.filter((_, i) => keep[i]);
-  return out.map((p, i) => (i === 0 || i === out.length - 1 ? p : [(out[i - 1][0] + 2 * p[0] + out[i + 1][0]) / 4, (out[i - 1][1] + 2 * p[1] + out[i + 1][1]) / 4]));
+  let out = pts.filter((_, i) => keep[i]);
+  out = squareCorners(out, 8);
+  return out.map((p, i) => {
+    if (i === 0 || i === out.length - 1 || turnAt(out, i) > Math.PI / 7) return p;
+    return [(out[i - 1][0] + 2 * p[0] + out[i + 1][0]) / 4, (out[i - 1][1] + 2 * p[1] + out[i + 1][1]) / 4];
+  });
+}
+
+function sharpTurns(pts) {
+  let n = 0;
+  for (let i = 1; i < pts.length - 1; i++) if (turnAt(pts, i) > Math.PI / 3) n++;
+  return n;
+}
+
+function turnAt(pts, i) {
+  const a = Math.atan2(pts[i][1] - pts[i - 1][1], pts[i][0] - pts[i - 1][0]);
+  const b = Math.atan2(pts[i + 1][1] - pts[i][1], pts[i + 1][0] - pts[i][0]);
+  let t = Math.abs(b - a);
+  return t > Math.PI ? 2 * Math.PI - t : t;
+}
+
+function squareCorners(pts, maxCut) {
+  const out = pts.slice();
+  for (let i = 1; i < out.length - 2; i++) {
+    const p0 = out[i - 1], p1 = out[i], p2 = out[i + 1], p3 = out[i + 2];
+    const cut = Math.hypot(p2[0] - p1[0], p2[1] - p1[1]);
+    if (cut > maxCut || Math.hypot(p1[0] - p0[0], p1[1] - p0[1]) < cut || Math.hypot(p3[0] - p2[0], p3[1] - p2[1]) < cut) continue;
+    const t1 = turnAt(out, i), t2 = turnAt(out, i + 1);
+    const total = t1 + t2;
+    if (t1 < 0.25 || t2 < 0.25 || total < Math.PI / 3 || total > Math.PI * 0.75) continue;
+    // Both turns must bend the same way.
+    const c1 = (p1[0] - p0[0]) * (p2[1] - p1[1]) - (p1[1] - p0[1]) * (p2[0] - p1[0]);
+    const c2 = (p2[0] - p1[0]) * (p3[1] - p2[1]) - (p2[1] - p1[1]) * (p3[0] - p2[0]);
+    if (c1 * c2 <= 0) continue;
+    const x = intersect(p0, p1, p2, p3);
+    if (!x || Math.hypot(x[0] - (p1[0] + p2[0]) / 2, x[1] - (p1[1] + p2[1]) / 2) > cut * 1.5) continue;
+    out.splice(i, 2, x);
+  }
+  return out;
+}
+
+function intersect([x1, y1], [x2, y2], [x3, y3], [x4, y4]) {
+  const d = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
+  if (Math.abs(d) < 1e-9) return null;
+  const a = x1 * y2 - y1 * x2, b = x3 * y4 - y3 * x4;
+  return [(a * (x3 - x4) - (x1 - x2) * b) / d, (a * (y3 - y4) - (y1 - y2) * b) / d];
 }
 
 // Each line takes the average colour of the ink under it; lines are then
