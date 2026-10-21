@@ -7,7 +7,7 @@
     "dev": "vite --host",
     "build": "vite build",
     "preview": "vite preview --host",
-    "test": "node test/georef.test.mjs && node test/e2e.test.mjs && node test/osm.test.mjs && node test/match.test.mjs && node test/linework.test.mjs && node test/linesedit.test.mjs",
+    "test": "node test/georef.test.mjs && node test/e2e.test.mjs && node test/osm.test.mjs && node test/match.test.mjs && node test/linework.test.mjs && node test/combined.test.mjs && node test/linesedit.test.mjs",
     "render": "node tools/render.mjs"
   },
   "dependencies": {
@@ -17,6 +17,7 @@
     "d3-geo-projection": "^4.0.0",
     "maplibre-gl": "^6.15.0",
     "pbf": "^5.1.2",
+    "pdfjs-dist": "^6.4.299",
     "topojson-client": "^3.1.0",
     "vtracer-wasm": "^0.1.0"
   },

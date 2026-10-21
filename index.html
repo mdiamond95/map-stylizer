@@ -22,7 +22,7 @@
       <button role="tab" data-view="style"><b>3</b> Style &amp; export</button>
     </nav>
     <div class="actions">
-      <button id="open-image" class="primary">Open map image</button>
+      <button id="open-image" class="primary">Open map (image or PDF)</button>
       <button id="open-project">Open project</button>
       <button id="save-project">Save project</button>
     </div>
@@ -65,8 +65,10 @@
         <label class="row">Map image <input id="image-opacity" type="range" min="0" max="1" step="0.05" value="1"></label>
         <label class="row">Vectors <input id="vector-opacity" type="range" min="0" max="1" step="0.05" value="1"></label>
         <h2>Lines from your scan</h2>
-        <p class="hint">Copies the lines drawn on your map as clean strokes, leaving out lettering, colour fills and the paper. Each ink colour becomes its own layer. No points needed.</p>
+        <p class="hint">Copies the lines drawn on your map as clean strokes, leaving out lettering, colour fills and the paper. No points needed.</p>
         <div class="lines">
+          <label class="row">Method <select id="lines-method"><option value="combined">Combined (cleanest)</option><option value="ink">Ink only</option></select></label>
+          <p class="hint small" id="lines-method-hint"></p>
           <label class="row">Faint lines <input id="lines-contrast" type="range" min="0.08" max="0.35" step="0.01" value="0.18"></label>
           <label class="row">Lettering <input id="lines-size" type="range" min="0.004" max="0.03" step="0.001" value="0.012"></label>
           <label class="row"><input type="checkbox" id="lines-peel" checked> Clean lettering off lines</label>

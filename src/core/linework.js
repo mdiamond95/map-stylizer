@@ -44,7 +44,9 @@ export function extractLinework(rgba, width, height, options = {}, onProgress) {
     .filter((l) => { const len = lineLength(l); if (len > unit * 0.03) return true; const sharp = sharpTurns(l); return !(sharp >= 3 && sharp * 12 > len); })
     .map((l) => l.map((p) => [p[0] * o.outScale, p[1] * o.outScale]));
   onProgress?.('Sorting by colour');
-  return { layers: groupByColour(lines, rgba, width, o.colours, o.outScale) };
+  const result = { layers: groupByColour(lines, rgba, width, o.colours, o.outScale) };
+  if (o.keepLines) result.lines = lines;
+  return result;
 }
 
 function paperAt(img, x, y) {
@@ -280,7 +282,7 @@ function runsAcross(mask, w, h, dx, dy) {
 
 // Zhang-Suen thinning: peels ink from both sides until every line is one
 // pixel wide, keeping its connections.
-function thin(mask, w, h) {
+export function thin(mask, w, h) {
   let candidates = [];
   for (let i = 0; i < mask.length; i++) {
     const x = i % w, y = (i - x) / w;
@@ -318,7 +320,7 @@ const NB4FIRST = [[1, 0], [0, 1], [-1, 0], [0, -1], [1, 1], [-1, 1], [-1, -1], [
 // junctions so each stretch between crossings is one path. Branches are
 // counted by on/off changes around a pixel, so the staircase corners of a
 // diagonal line don't read as junctions.
-function traceSkeleton(mask, w, h) {
+export function traceSkeleton(mask, w, h) {
   const at = (x, y) => (x >= 0 && y >= 0 && x < w && y < h ? mask[y * w + x] : 0);
   const branches = (i) => {
     const x = i % w, y = (i - x) / w;
@@ -382,7 +384,7 @@ function traceSkeleton(mask, w, h) {
 // a network: short dead ends and small closed loops are trimmed, and pieces
 // that meet end to end with nothing else at the joint are rejoined, so a
 // street stays one line however many spurs were cut off it.
-function prune(lines, spur, loop) {
+export function prune(lines, spur, loop) {
   // Junctions are often a few touching pixels; ends that touch are one joint.
   const key = (p) => p[1] * 1e6 + p[0];
   const parent = new Map();
@@ -457,7 +459,7 @@ function joinChains(segs) {
 // about 45 degrees, so a short cut between two straight runs is replaced by
 // the point where those runs meet. Only gentle bends are smoothed, so pixel
 // steps don't show and corners stay sharp.
-function simplify(pts, tol) {
+export function simplify(pts, tol) {
   if (pts.length < 3) return pts;
   const keep = new Uint8Array(pts.length);
   keep[0] = keep[pts.length - 1] = 1;
@@ -600,7 +602,7 @@ function groupByColour(lines, rgba, w, k, outScale) {
   return layers;
 }
 
-function colourName([r, g, b]) {
+export function colourName([r, g, b]) {
   const max = Math.max(r, g, b), min = Math.min(r, g, b), l = (max + min) / 2;
   if (max - min < 30) return l < 90 ? 'Black' : l < 170 ? 'Grey' : 'Light grey';
   let hue = max === r ? ((g - b) / (max - min)) % 6 : max === g ? (b - r) / (max - min) + 2 : (r - g) / (max - min) + 4;
@@ -609,10 +611,10 @@ function colourName([r, g, b]) {
   return (l < 110 ? 'Dark ' + name.toLowerCase() : name).replace(/^./, (c) => c.toUpperCase());
 }
 
-function toPath(lines) {
+export function toPath(lines) {
   return lines.map((l) => 'M' + l.map((p) => `${Math.round(p[0] * 10) / 10},${Math.round(p[1] * 10) / 10}`).join('L')).join('');
 }
-function lineLength(l) { let s = 0; for (let i = 1; i < l.length; i++) s += Math.hypot(l[i][0] - l[i - 1][0], l[i][1] - l[i - 1][1]); return s; }
+export function lineLength(l) { let s = 0; for (let i = 1; i < l.length; i++) s += Math.hypot(l[i][0] - l[i - 1][0], l[i][1] - l[i - 1][1]); return s; }
 function sum(c) { return c[0] + c[1] + c[2]; }
 function dist2(a, b) { return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2; }
 function nearest(cs, c) { let best = 0, bd = Infinity; cs.forEach((q, i) => { const d = dist2(q, c); if (d < bd) { bd = d; best = i; } }); return best; }

@@ -12,6 +12,7 @@ import { ImageViewer } from './ui/viewer.js';
 import { RefMap } from './ui/refmap.js';
 import { sampleColour, traceColour } from './ui/trace.js';
 import { download, pickFile, readAsDataUrl, loadImage, svgToPng, autosave, restore } from './ui/files.js';
+import { pdfToImage } from './ui/pdf.js';
 
 const $ = (s) => document.querySelector(s);
 const BASE = import.meta.env.BASE_URL;
@@ -104,12 +105,26 @@ function showView(v) {
 
 // ---------- image ----------
 $('#open-image').addEventListener('click', async () => {
-  const file = await pickFile('image/*');
+  const file = await pickFile('image/*,application/pdf,.pdf');
   if (!file) return;
-  const dataUrl = await readAsDataUrl(file);
-  const img = await loadImage(dataUrl);
+  let image;
+  if (file.type === 'application/pdf' || /\.pdf$/i.test(file.name)) {
+    toast('Opening the PDF…', 4000);
+    try {
+      const pdf = await pdfToImage(file);
+      if (pdf.pages > 1) toast(`This PDF has ${pdf.pages} pages. Using the first.`, 4000);
+      image = { name: file.name, width: pdf.width, height: pdf.height, dataUrl: pdf.dataUrl };
+    } catch (err) {
+      toast(`Couldn't open that PDF: ${err.message || err}`, 6000);
+      return;
+    }
+  } else {
+    const dataUrl = await readAsDataUrl(file);
+    const img = await loadImage(dataUrl);
+    image = { name: file.name, width: img.naturalWidth, height: img.naturalHeight, dataUrl };
+  }
   const keepPins = project.gcps.length && confirm('Keep the points from the current map?');
-  project = { ...(keepPins ? project : newProject()), image: { name: file.name, width: img.naturalWidth, height: img.naturalHeight, dataUrl } };
+  project = { ...(keepPins ? project : newProject()), image };
   if (!keepPins) project.name = file.name.replace(/\.[^.]+$/, '');
   await loadProject(project);
   save();
@@ -437,6 +452,8 @@ function syncControls() {
   $('#lines-contrast').value = project.linework?.options?.contrast ?? 0.18;
   $('#lines-size').value = project.linework?.options?.minSize ?? 0.012;
   $('#lines-peel').checked = project.linework?.options?.peel ?? true;
+  $('#lines-method').value = project.linework?.options?.method ?? 'combined';
+  syncLinesMethod();
   resetTidy();
   renderLines();
   syncDrawMode();
@@ -614,15 +631,17 @@ $('#lines-run').addEventListener('click', () => {
   if (!imageEl) return;
   const btn = $('#lines-run');
   const W = project.image.width, H = project.image.height;
-  // Up to about 9 MP is read at full detail; bigger scans are read smaller.
-  const scale = Math.min(1, Math.sqrt(9e6 / (W * H)));
+  const method = $('#lines-method').value;
+  // Up to about 9 MP (12 MP for the combined method, which gains most from
+  // detail) is read at full detail; bigger scans are read smaller.
+  const scale = Math.min(1, Math.sqrt((method === 'ink' ? 9e6 : 12e6) / (W * H)));
   const c = document.createElement('canvas');
   c.width = Math.round(W * scale); c.height = Math.round(H * scale);
   const g = c.getContext('2d', { willReadFrequently: true });
   g.drawImage(imageEl, 0, 0, c.width, c.height);
   const data = g.getImageData(0, 0, c.width, c.height).data;
   const id = ++linesJob;
-  const options = { contrast: +$('#lines-contrast').value, minSize: +$('#lines-size').value, peel: $('#lines-peel').checked, outScale: 1 / scale };
+  const options = { method, contrast: +$('#lines-contrast').value, minSize: +$('#lines-size').value, peel: $('#lines-peel').checked, outScale: 1 / scale };
   btn.disabled = true; btn.textContent = 'Pulling lines…';
   linesWorker.onmessage = (e) => {
     if (e.data.id !== linesJob) return;
@@ -632,16 +651,26 @@ $('#lines-run').addEventListener('click', () => {
     const old = new Map((project.linework?.layers || []).map((l) => [l.name, l]));
     project.linework = {
       options, imageWidth: W, imageHeight: H, strokeWidth: 1.4,
-      layers: e.data.result.layers.map((l) => ({ ...l, show: old.get(l.name)?.show ?? true }))
+      layers: e.data.result.layers.map((l) => ({ ...l, show: old.get(l.name)?.show ?? l.show ?? true }))
     };
     if (!model) project.draw = 'scan';
     else if (project.draw === 'reference') project.draw = 'both';
     resetTidy();
     syncDrawMode(); renderLines(); refreshCheck(); save();
-    toast(project.linework.layers.length ? `Found ${project.linework.layers.length} line ${project.linework.layers.length === 1 ? 'colour' : 'colours'}. Slide “Map image” down to see them, and untick any you don't want.` : 'No lines found. Move “Faint lines” to the left and try again.', 5000);
+    const found = project.linework.layers.length;
+    if (!found) toast('No lines found. Move “Faint lines” to the left and try again.', 5000);
+    else if (method === 'ink') toast(`Found ${found} line ${found === 1 ? 'colour' : 'colours'}. Slide “Map image” down to see them, and untick any you don't want.`, 5000);
+    else toast(`Found ${found} layers. Street centres and Unsure lines start hidden: tick them to see them. Slide “Map image” down to compare with the scan.`, 6000);
   };
   linesWorker.postMessage({ id, rgba: data.buffer, width: c.width, height: c.height, options }, [data.buffer]);
 });
+function syncLinesMethod() {
+  const ink = $('#lines-method').value === 'ink';
+  $('#lines-method-hint').textContent = ink
+    ? 'Ink only follows the printed ink. Each ink colour becomes its own layer. Quicker, but lettering that touches lines can stay.'
+    : 'Combined runs several methods and keeps the lines they agree on: block outlines, the shoreline from the water colour, and the ink with street names painted out. Lines only one method found go in “Unsure lines”, hidden at first. Takes about half a minute.';
+}
+$('#lines-method').addEventListener('change', syncLinesMethod);
 function renderLines() {
   const ul = $('#lines-list');
   const layers = project.linework?.layers || [];
