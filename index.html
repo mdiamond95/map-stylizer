@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en-CA">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#1d3b53">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Map Stylizer">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <title>Map Stylizer</title>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><img src="icons/icon.svg" alt="" width="28" height="28"><span>Map Stylizer</span></div>
+    <input id="project-name" class="project-name" aria-label="Project name" value="Untitled map">
+    <nav class="tabs" role="tablist">
+      <button role="tab" data-view="pin" class="active"><b>1</b> Pin</button>
+      <button role="tab" data-view="check"><b>2</b> Check</button>
+      <button role="tab" data-view="style"><b>3</b> Style &amp; export</button>
+    </nav>
+    <div class="actions">
+      <button id="open-image" class="primary">Open map image</button>
+      <button id="open-project">Open project</button>
+      <button id="save-project">Save project</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="view-pin" class="view active">
+      <div id="pin-image" class="pane"></div>
+      <div class="pin-side">
+        <div id="pin-map" class="pane map"></div>
+        <div class="panel">
+          <p id="pin-hint" class="hint">Open a map image, then tap a spot on it and the same spot on the reference map. Cities snap exactly.</p>
+          <div class="search">
+            <input id="place-search" type="search" placeholder="Search a city or country to place the point" autocomplete="off">
+            <ul id="place-results"></ul>
+          </div>
+          <div class="fit">
+            <label>Projection
+              <select id="projection"></select>
+            </label>
+            <button id="detect">Detect projection</button>
+            <label>Fit
+              <select id="transform"></select>
+            </label>
+          </div>
+          <div id="detect-results" class="chips"></div>
+          <div id="fit-status" class="status"></div>
+          <ol id="pin-list" class="pin-list"></ol>
+        </div>
+      </div>
+    </section>
+
+    <section id="view-check" class="view">
+      <div id="check-image" class="pane"></div>
+      <aside class="panel side">
+        <h2>Overlay</h2>
+        <label class="row">Map image <input id="image-opacity" type="range" min="0" max="1" step="0.05" value="1"></label>
+        <label class="row">Vectors <input id="vector-opacity" type="range" min="0" max="1" step="0.05" value="1"></label>
+        <label class="row">Detail
+          <select id="detail"></select>
+        </label>
+        <h2>Layers</h2>
+        <div id="layer-toggles" class="toggles"></div>
+        <label class="row">Rivers <input id="river-rank" type="range" min="0" max="10" step="1" value="6"></label>
+        <label class="row">Cities <input id="place-limit" type="range" min="0" max="120" step="5" value="40"></label>
+        <h2>Selected country</h2>
+        <div id="selection" class="selection"><p class="hint">Tap a country on the map.</p></div>
+        <h2>Trace a colour</h2>
+        <p class="hint">For things reference data does not have, like a shaded empire or a drawn route. Tap “Pick colour”, then tap that colour on the map.</p>
+        <div class="trace">
+          <button id="pick-colour">Pick colour</button>
+          <span id="picked" class="swatch" title="Picked colour"></span>
+          <label class="row">Tolerance <input id="tolerance" type="range" min="5" max="120" step="5" value="40"></label>
+          <input id="trace-name" placeholder="Layer name, e.g. Roman Empire">
+          <button id="trace" class="primary" disabled>Trace</button>
+        </div>
+        <ul id="traced-list" class="traced-list"></ul>
+      </aside>
+    </section>
+
+    <section id="view-style" class="view">
+      <div class="preview-wrap"><div id="preview" class="preview"></div></div>
+      <aside class="panel side">
+        <h2>Style</h2>
+        <div id="style-list" class="style-list"></div>
+        <h2>Frame</h2>
+        <label class="row">Shape
+          <select id="frame-preset">
+            <option value="image">Whole map image</option>
+            <option value="16:9">16:9 video frame</option>
+          </select>
+        </label>
+        <div id="frame-controls">
+          <label class="row">Zoom <input id="frame-zoom" type="range" min="1" max="6" step="0.05" value="1"></label>
+          <label class="row">Left–right <input id="frame-x" type="range" min="0" max="1" step="0.005" value="0.5"></label>
+          <label class="row">Up–down <input id="frame-y" type="range" min="0" max="1" step="0.005" value="0.5"></label>
+        </div>
+        <label class="row">Export size
+          <select id="export-size">
+            <option value="1440">1440p (2560 × 1440)</option>
+            <option value="2160">4K (3840 × 2160)</option>
+          </select>
+        </label>
+        <h2>Export</h2>
+        <div class="exports">
+          <button id="export-svg" class="primary">Layered SVG</button>
+          <button id="export-png">PNG</button>
+          <button id="export-geojson">GeoJSON</button>
+        </div>
+        <p class="hint">The SVG has one named group per layer and one named path per country, so you can animate any of them in After Effects or Illustrator.</p>
+      </aside>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,155 @@
+// Turns pixel-space layers plus a style into a layered SVG, one named group
+// per layer and one named path per country, ready for Illustrator or After Effects.
+
+const LAYER_ORDER = ['ocean', 'graticule', 'land', 'lakes', 'rivers', 'provinceLines', 'borders', 'coastline', 'traced', 'places', 'labels'];
+
+// frame: the part of the image to export, in image pixels.
+// outWidth/outHeight: the export size. Style widths are pixels at that size.
+export function buildSvg(layers, style, opts = {}) {
+  const frame = opts.frame || { x: 0, y: 0, w: layers.width, h: layers.height };
+  const outWidth = opts.outWidth || Math.round(frame.w);
+  const outHeight = opts.outHeight || Math.round(frame.h);
+  // Style sizes are pixels in a 1440-tall export; scaling by the frame keeps
+  // the same visual weight at any export size or crop.
+  const s = (v) => fmt(v * (frame.h / 1440));
+  const show = { graticule: style.graticule?.show ?? false, provinceLines: true, rivers: true, lakes: true, places: true, labels: true, countryLabels: true, placeLabels: true, traced: true, ...(opts.show || {}) };
+  if (style.rivers?.show === false) show.rivers = false;
+  if (style.provinceLines?.show === false) show.provinceLines = false;
+  const highlight = new Set(opts.highlight || []);
+  const fade = new Set(opts.fade || []);
+  const L = style.labels || {};
+  const parts = [];
+  const defs = [];
+
+  // Filter regions are pinned to the frame: a region sized to a world-wide
+  // path's bounds would be huge and browsers silently skip drawing it.
+  const region = `filterUnits="userSpaceOnUse" x="${fmt(frame.x - frame.w * 0.05)}" y="${fmt(frame.y - frame.h * 0.05)}" width="${fmt(frame.w * 1.1)}" height="${fmt(frame.h * 1.1)}"`;
+  if (style.effects?.landShadow) {
+    const e = style.effects.landShadow;
+    defs.push(`<filter id="land-shadow" ${region}><feDropShadow dx="${s(e.dx)}" dy="${s(e.dy)}" stdDeviation="${s(e.blur)}" flood-color="${hex(e.colour)}" flood-opacity="${alpha(e.colour)}"/></filter>`);
+  }
+  if (style.effects?.glow) {
+    const e = style.effects.glow;
+    defs.push(`<filter id="glow" ${region}><feGaussianBlur stdDeviation="${s(e.blur)}" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>`);
+  }
+  if (style.effects?.paper) {
+    const op = style.effects.paper.opacity ?? 0.2;
+    defs.push(`<filter id="paper" ${region}><feTurbulence type="fractalNoise" baseFrequency="${fmt(0.9 / (frame.h / 1440))}" numOctaves="3" seed="7"/><feColorMatrix type="luminanceToAlpha" result="n"/><feComponentTransfer in="n" result="grain"><feFuncA type="linear" slope="${fmt(op * 2)}"/></feComponentTransfer><feFlood flood-color="${style.effects.paper.colour}"/><feComposite in2="grain" operator="in"/></filter>`);
+  }
+  const glow = style.effects?.glow ? ' filter="url(#glow)"' : '';
+
+  const line = (id, d, st, extra = '') => {
+    if (!d || !st || st.width === 0 || st.stroke === 'none') return '';
+    let out = '';
+    if (st.halo) out += `<path id="${id}-halo" d="${d}" fill="none" stroke="${st.halo.stroke}" stroke-width="${s(st.halo.width)}" stroke-opacity="${st.halo.opacity ?? 1}" stroke-linejoin="round" stroke-linecap="round"/>`;
+    out += `<path id="${id}-line" d="${d}" fill="none" stroke="${st.stroke}" stroke-width="${s(st.width)}"${st.opacity != null ? ` stroke-opacity="${st.opacity}"` : ''}${st.dash ? ` stroke-dasharray="${st.dash.split(/\s+/).map((v) => s(+v)).join(' ')}"` : ''} stroke-linejoin="round" stroke-linecap="round"${extra}/>`;
+    return out;
+  };
+
+  for (const layer of LAYER_ORDER) {
+    if (layer === 'ocean') {
+      parts.push(group('ocean', `<rect x="${fmt(frame.x - frame.w)}" y="${fmt(frame.y - frame.h)}" width="${fmt(frame.w * 3)}" height="${fmt(frame.h * 3)}" fill="${style.ocean}"/>`));
+    } else if (layer === 'graticule' && show.graticule) {
+      parts.push(group('graticule', line('graticule', layers.graticule, style.graticule)));
+    } else if (layer === 'land') {
+      const paths = layers.countries.map((c) => {
+        const fill = highlight.has(c.id) ? style.land.highlight : fade.has(c.id) ? style.land.fade : (style.land.palette ? style.land.palette[(c.colour - 1) % style.land.palette.length] : style.land.fill);
+        return `<path id="country-${safeId(c.id)}" data-name="${esc(c.name)}" d="${c.d}" fill="${fill}"/>`;
+      }).join('');
+      const shadow = style.effects?.landShadow ? ' filter="url(#land-shadow)"' : '';
+      parts.push(group('land', paths, shadow));
+      if (style.effects?.paper) parts.push(group('paper-texture', `<rect x="${fmt(frame.x)}" y="${fmt(frame.y)}" width="${fmt(frame.w)}" height="${fmt(frame.h)}" fill="#fff" filter="url(#paper)"/>`));
+    } else if (layer === 'lakes' && show.lakes) {
+      const st = style.lakes;
+      parts.push(group('lakes', layers.lakes.map((l, i) => `<path id="lake-${i}" data-name="${esc(l.name || '')}" d="${l.d}" fill="${st.fill}" stroke="${st.stroke}" stroke-width="${s(st.width)}"/>`).join('')));
+    } else if (layer === 'rivers' && show.rivers) {
+      const st = style.rivers;
+      parts.push(group('rivers', layers.rivers.map((r, i) => `<path id="river-${i}" data-name="${esc(r.name || '')}" d="${r.d}" fill="none" stroke="${st.stroke}" stroke-width="${s(st.width * riverScale(r.rank))}"${st.opacity != null ? ` stroke-opacity="${st.opacity}"` : ''} stroke-linecap="round" stroke-linejoin="round"/>`).join(''), glow));
+    } else if (layer === 'provinceLines' && show.provinceLines) {
+      parts.push(group('province-borders', line('province-borders', layers.provinceLines, style.provinceLines), glow));
+    } else if (layer === 'borders') {
+      parts.push(group('country-borders', line('country-borders', layers.borders, style.borders), glow));
+    } else if (layer === 'coastline') {
+      parts.push(group('coastline', line('coastline', layers.coastline, style.coastline), glow));
+    } else if (layer === 'traced' && show.traced && opts.traced?.length) {
+      parts.push(group('traced', opts.traced.map((t, i) => `<g id="traced-${i}" data-name="${esc(t.name)}">${t.paths.map((d) => `<path d="${d}" fill="${t.mode === 'line' ? 'none' : t.fill}" stroke="${t.mode === 'line' ? t.fill : 'none'}" stroke-width="${t.mode === 'line' ? s(4) : 0}"/>`).join('')}</g>`).join('')));
+    } else if (layer === 'places' && show.places) {
+      const st = style.places;
+      parts.push(group('places', layers.places.map((p, i) => marker(`place-${i}`, p, st, s)).join('')));
+    } else if (layer === 'labels' && show.labels) {
+      const textAttrs = (size, weight, fontStyle) => `font-family="${esc(L.font)}" font-size="${s(size)}" font-weight="${weight}"${fontStyle && fontStyle !== 'normal' ? ` font-style="${fontStyle}"` : ''} fill="${L.fill}" stroke="${L.halo}" stroke-width="${s(L.haloWidth)}" stroke-linejoin="round" paint-order="stroke"`;
+      const caseFn = (t) => (L.countryCase === 'upper' ? t.toUpperCase() : t);
+      const placed = [];
+      const unit = frame.h / 1440;
+      const countryLabels = show.countryLabels ? placeCountryLabels(layers.countries, { L, unit, frame, fade, placed, names: opts.names || {}, force: new Set(opts.labelForce || []), hide: new Set(opts.labelHide || []) })
+        .map((c) => `<text id="label-${safeId(c.id)}" x="${fmt(c.x)}" y="${fmt(c.y)}" text-anchor="middle" dominant-baseline="middle" letter-spacing="${s(L.letterSpacing || 0)}" ${textAttrs(L.countrySize, L.countryWeight, L.countryStyle)}>${esc(caseFn(c.text))}</text>`).join('') : '';
+      const placeLabels = show.placeLabels && show.places ? placePlaceLabels(layers.places, { L, unit, frame, placed, gap: (style.places.radius + 4) * unit })
+        .map((p) => `<text id="place-label-${p.i}" x="${fmt(p.x)}" y="${fmt(p.y)}" text-anchor="${p.anchor}" dominant-baseline="middle" ${textAttrs(L.placeSize, L.placeWeight, L.placeStyle)}>${esc(p.name)}</text>`).join('') : '';
+      parts.push(group('labels', group('country-labels', countryLabels) + group('place-labels', placeLabels)));
+    }
+  }
+
+  const credit = opts.credit !== false ? `<desc>Made with Map Stylizer. Reference data: Natural Earth (public domain).</desc>` : '';
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="${outWidth}" height="${outHeight}" viewBox="${fmt(frame.x)} ${fmt(frame.y)} ${fmt(frame.w)} ${fmt(frame.h)}">${credit}<defs>${defs.join('')}<clipPath id="frame"><rect x="${fmt(frame.x)}" y="${fmt(frame.y)}" width="${fmt(frame.w)}" height="${fmt(frame.h)}"/></clipPath></defs><g id="map" clip-path="url(#frame)">${parts.join('')}</g></svg>`;
+}
+
+// Labels biggest countries first and skips any label that would not fit
+// inside its country or would collide with one already placed.
+function placeCountryLabels(countries, { L, unit, frame, fade, placed, names, force, hide }) {
+  const h = L.countrySize * unit;
+  const out = [];
+  const sorted = countries.filter((c) => c.label && !fade.has(c.id) && !hide.has(c.id) && inside(c.label, frame))
+    .sort((a, b) => (force.has(b.id) - force.has(a.id)) || b.area - a.area);
+  for (const c of sorted) {
+    const text = names[c.id] || c.name;
+    const w = textWidth(text, L.countrySize, L.letterSpacing) * unit;
+    const box = [c.label[0] - w / 2, c.label[1] - h / 2, c.label[0] + w / 2, c.label[1] + h / 2];
+    const fits = c.area > w * h * 1.6 && (c.box[2] - c.box[0]) > w * 0.9;
+    if (!force.has(c.id) && (!fits || placed.some((p) => overlaps(p, box)))) continue;
+    placed.push(box);
+    out.push({ id: c.id, text, x: c.label[0], y: c.label[1] });
+  }
+  return out;
+}
+
+function placePlaceLabels(places, { L, unit, frame, placed, gap }) {
+  const h = L.placeSize * unit;
+  const out = [];
+  places.forEach((p, i) => {
+    if (!inside([p.x, p.y], frame)) return;
+    const w = textWidth(p.name, L.placeSize, 0) * unit;
+    for (const anchor of ['start', 'end']) {
+      const x = anchor === 'start' ? p.x + gap : p.x - gap;
+      const box = anchor === 'start' ? [x, p.y - h / 2, x + w, p.y + h / 2] : [x - w, p.y - h / 2, x, p.y + h / 2];
+      if (box[0] < frame.x || box[2] > frame.x + frame.w || placed.some((b) => overlaps(b, box))) continue;
+      placed.push(box);
+      out.push({ i, name: p.name, x, y: p.y, anchor });
+      return;
+    }
+  });
+  return out;
+}
+
+function textWidth(text, size, spacing = 0) { return text.length * (size * 0.6 + spacing); }
+function overlaps(a, b) { return a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]; }
+
+function marker(id, p, st, s) {
+  const r = s(p.capital ? st.radius * 1.15 : st.radius);
+  const common = `fill="${st.fill}" stroke="${st.stroke}" stroke-width="${s(2)}"`;
+  if (p.capital && st.capitalShape === 'square') return `<rect id="${id}" data-name="${esc(p.name)}" x="${fmt(p.x - r)}" y="${fmt(p.y - r)}" width="${fmt(2 * r)}" height="${fmt(2 * r)}" ${common}/>`;
+  if (p.capital && st.capitalShape === 'star') {
+    const pts = [];
+    for (let i = 0; i < 10; i++) { const a = -Math.PI / 2 + i * Math.PI / 5; const rr = i % 2 ? r * 0.5 : r * 1.3; pts.push(`${fmt(p.x + rr * Math.cos(a))},${fmt(p.y + rr * Math.sin(a))}`); }
+    return `<polygon id="${id}" data-name="${esc(p.name)}" points="${pts.join(' ')}" ${common}/>`;
+  }
+  return `<circle id="${id}" data-name="${esc(p.name)}" cx="${fmt(p.x)}" cy="${fmt(p.y)}" r="${fmt(r)}" ${common}/>`;
+}
+
+function riverScale(rank) { return rank <= 2 ? 1.4 : rank <= 4 ? 1 : 0.7; }
+function inside(p, f) { return p[0] >= f.x && p[0] <= f.x + f.w && p[1] >= f.y && p[1] <= f.y + f.h; }
+function group(id, inner, attrs = '') { return inner ? `<g id="${id}"${attrs}>${inner}</g>` : ''; }
+function fmt(v) { return Math.round(v * 100) / 100; }
+function safeId(s) { return String(s).replace(/[^A-Za-z0-9_-]/g, '_'); }
+function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+function hex(c) { return c.length === 9 ? c.slice(0, 7) : c; }
+function alpha(c) { return c.length === 9 ? Math.round(parseInt(c.slice(7), 16) / 2.55) / 100 : 1; }

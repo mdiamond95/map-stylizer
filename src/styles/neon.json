@@ -1,0 +1,16 @@
+{
+  "id": "neon",
+  "name": "Blueprint / neon",
+  "note": "Dark background with glowing lines, for tech or military topics.",
+  "ocean": "#070b1a",
+  "land": { "fill": "#0f1730", "palette": null, "highlight": "#ff2e88", "fade": "#0b1024" },
+  "lakes": { "fill": "#070b1a", "stroke": "#2ee6ff", "width": 1 },
+  "rivers": { "stroke": "#2ee6ff", "width": 1, "opacity": 0.6 },
+  "coastline": { "stroke": "#2ee6ff", "width": 2.2 },
+  "borders": { "stroke": "#a6f7ff", "width": 1.6 },
+  "provinceLines": { "stroke": "#2ee6ff", "width": 0.8, "opacity": 0.45, "dash": "4 4" },
+  "graticule": { "stroke": "#2ee6ff", "width": 0.6, "opacity": 0.18, "show": true },
+  "places": { "fill": "#ffffff", "stroke": "#2ee6ff", "radius": 4.5, "capitalShape": "circle" },
+  "labels": { "font": "'Rajdhani', 'Eurostile', 'Arial Narrow', sans-serif", "fill": "#d8fbff", "halo": "#070b1a", "haloWidth": 4, "countrySize": 28, "countryWeight": 700, "countryCase": "upper", "letterSpacing": 4, "placeSize": 20, "placeWeight": 600 },
+  "effects": { "glow": { "colour": "#2ee6ff", "blur": 6 } }
+}
