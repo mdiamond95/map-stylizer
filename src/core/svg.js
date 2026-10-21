@@ -90,9 +90,30 @@ export function buildSvg(layers, style, opts = {}) {
     }
   }
 
+  if (opts.linework) parts.push(lineworkGroup(opts.linework, s));
+
   const source = layers.osm ? '© OpenMapTiles © OpenStreetMap contributors (ODbL)' : 'Natural Earth (public domain)';
   const credit = opts.credit !== false ? `<desc>Made with Map Stylizer. Reference data: ${source}.</desc>` : '';
   return `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="${outWidth}" height="${outHeight}" viewBox="${fmt(frame.x)} ${fmt(frame.y)} ${fmt(frame.w)} ${fmt(frame.h)}">${credit}<defs>${defs.join('')}<clipPath id="frame"><rect x="${fmt(frame.x)}" y="${fmt(frame.y)}" width="${fmt(frame.w)}" height="${fmt(frame.h)}"/></clipPath></defs><g id="map" clip-path="url(#frame)">${parts.join('')}</g></svg>`;
+}
+
+// Lines pulled straight off the scan, one group per ink colour, as strokes
+// so an editor can change their colour and weight or draw them on.
+export function lineworkGroup(linework, s) {
+  const layers = (linework?.layers || []).filter((l) => l.show !== false && l.d);
+  return group('scan-lines', layers.map((l, i) => `<g id="scan-lines-${i + 1}" data-name="${esc(l.name)}"><path d="${l.d}" fill="none" stroke="${l.colour}" stroke-width="${s(linework.strokeWidth ?? 2)}" stroke-linecap="round" stroke-linejoin="round"/></g>`).join(''));
+}
+
+// Only the scan's own lines on a plain background: no reference data, so no
+// pins are needed.
+export function buildLineworkSvg(linework, style, opts = {}) {
+  const frame = opts.frame || { x: 0, y: 0, w: linework.imageWidth, h: linework.imageHeight };
+  const outWidth = opts.outWidth || Math.round(frame.w);
+  const outHeight = opts.outHeight || Math.round(frame.h);
+  const s = (v) => fmt(v * (frame.h / 1440));
+  const c = { ...cityDefaults(style), ...(style.city || {}) };
+  const bg = group('background', `<rect x="${fmt(frame.x)}" y="${fmt(frame.y)}" width="${fmt(frame.w)}" height="${fmt(frame.h)}" fill="${c.land}"/>`);
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="${outWidth}" height="${outHeight}" viewBox="${fmt(frame.x)} ${fmt(frame.y)} ${fmt(frame.w)} ${fmt(frame.h)}"><desc>Made with Map Stylizer. Lines traced from the scanned map.</desc><defs><clipPath id="frame"><rect x="${fmt(frame.x)}" y="${fmt(frame.y)}" width="${fmt(frame.w)}" height="${fmt(frame.h)}"/></clipPath></defs><g id="map" clip-path="url(#frame)">${bg}${lineworkGroup(linework, s)}</g></svg>`;
 }
 
 // City and town maps: OpenStreetMap water, parks, roads and street names.

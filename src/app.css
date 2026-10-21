@@ -199,3 +199,10 @@ main { flex: 1; min-height: 0; position: relative; }
 .ck-rail { fill: none; stroke: #333; stroke-width: 1.4; stroke-dasharray: 5 3; }
 .ck-dropped { fill: none; stroke: #5b6b7a; stroke-width: 1; stroke-dasharray: 4 4; opacity: 0.55; }
 .build { color: var(--ink-2); font-weight: 400; font-size: 11px; }
+
+/* lines from the scan */
+.lines { display: grid; gap: 6px; }
+.lines #lines-run { width: 100%; }
+.hint.small { font-size: 12px; margin: 0; }
+.ck-lines { fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+#draw-mode { margin-bottom: 10px; }

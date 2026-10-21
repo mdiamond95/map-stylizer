@@ -4,7 +4,7 @@ import { TRANSFORMS, fitModel, minPoints, optimiseParams } from './core/georef.j
 import { buildReference, searchPlaces, DETAIL_LEVELS } from './core/reference.js';
 import { makePixelPath, buildPixelLayers } from './core/render.js';
 import { loadOsm, makeTileFetcher, OSM_ATTRIBUTION } from './core/osm.js';
-import { buildSvg } from './core/svg.js';
+import { buildSvg, buildLineworkSvg } from './core/svg.js';
 import { makeInkImage, matchSettings } from './core/match.js';
 import { STYLES } from './styles/index.js';
 import { ImageViewer } from './ui/viewer.js';
@@ -44,6 +44,8 @@ function newProject() {
     show: { land: true, borders: true, coastline: true, provinceLines: true, rivers: true, lakes: true, places: true, countryLabels: true, placeLabels: true, graticule: false, buildings: false, traced: true },
     highlight: [], fade: [], names: {}, labelHide: [],
     traced: [],
+    linework: null,
+    draw: 'reference',
     style: 'clean-explainer',
     frame: { preset: 'image', zoom: 1, cx: 0.5, cy: 0.5 },
     exportHeight: 1440
@@ -86,7 +88,9 @@ getRef('medium').then((ref) => refMap.setReference(ref));
 let view = 'pin';
 document.querySelectorAll('.tabs button').forEach((b) => b.addEventListener('click', () => showView(b.dataset.view)));
 function showView(v) {
-  if (v !== 'pin' && !model) { toast(project.image ? `Place at least ${minPoints(project.georef.transform)} matching points first.` : 'Open a map image first.'); return; }
+  if (v !== 'pin' && !project.image) { toast('Open a map image first.'); return; }
+  // Lines pulled from the scan need no points; the map data does.
+  if (v === 'style' && !model && !hasLines()) { toast(`Place at least ${minPoints(project.georef.transform)} matching points, or use “Pull lines from scan” in Check.`, 5000); return; }
   view = v;
   document.querySelectorAll('.tabs button').forEach((b) => b.classList.toggle('active', b.dataset.view === v));
   document.querySelectorAll('.view').forEach((s) => s.classList.toggle('active', s.id === `view-${v}`));
@@ -263,6 +267,7 @@ function refit() {
     model = null;
     console.warn(err);
   }
+  syncDrawMode();
   const st = $('#fit-status');
   if (!model) {
     const need = minPoints(project.georef.transform);
@@ -426,6 +431,10 @@ function syncControls() {
   $('#frame-controls').hidden = project.frame.preset !== '16:9';
   renderStyleList();
   renderTraced();
+  $('#lines-contrast').value = project.linework?.options?.contrast ?? 0.18;
+  $('#lines-size').value = project.linework?.options?.minSize ?? 0.012;
+  renderLines();
+  syncDrawMode();
 }
 
 $('#project-name').addEventListener('change', (e) => { project.name = e.target.value.trim() || 'Untitled map'; save(); });
@@ -480,10 +489,16 @@ function getMatch() {
   return { img: inkCache.img, scale: inkCache.scale, settings: matchSettings(project.options.matchStrictness ?? 0.4, tolerance) };
 }
 
+function hasLines() { return !!project.linework?.layers?.length; }
+function linesOverlay() {
+  if (!hasLines()) return '';
+  return project.linework.layers.filter((l) => l.show !== false).map((l) => `<path class="ck-lines" d="${l.d}" stroke="${l.colour}"/>`).join('');
+}
+
 async function refreshCheck() {
   if (view !== 'check') return;
-  const L = await getLayers();
-  if (!L) return;
+  const L = model ? await getLayers() : null;
+  if (!L) { checkViewer.setOverlay(linesOverlay()); renderSelection({ countries: [] }); return; }
   const sh = project.show;
   const hi = new Set(project.highlight), fa = new Set(project.fade);
   let out = '';
@@ -495,7 +510,7 @@ async function refreshCheck() {
     if (o.dropped) out += `<path class="ck-dropped" d="${o.dropped}"/>`;
     out += `<path class="ck-road-minor" d="${o.roads.minor}"/><path class="ck-road" d="${o.roads.medium}"/><path class="ck-road-major" d="${o.roads.major}"/><path class="ck-rail" d="${o.roads.rail}"/>`;
     if (sh.traced) out += project.traced.map((t) => `<g class="ck-traced">${t.paths.map((d) => `<path d="${d}" fill="${t.fill}"/>`).join('')}</g>`).join('');
-    checkViewer.setOverlay(out);
+    checkViewer.setOverlay(out + linesOverlay());
     renderSelection({ countries: [] });
     return;
   }
@@ -508,7 +523,7 @@ async function refreshCheck() {
   if (sh.coastline) out += `<path class="ck-coast" d="${L.coastline}"/>`;
   if (sh.traced) out += project.traced.map((t) => `<g class="ck-traced">${t.paths.map((d) => `<path d="${d}" fill="${t.fill}"/>`).join('')}</g>`).join('');
   if (sh.places) out += L.places.map((p) => `<circle class="ck-place" cx="${p.x}" cy="${p.y}" r="${Math.max(2, project.image.width / 600)}"/>`).join('');
-  checkViewer.setOverlay(out);
+  checkViewer.setOverlay(out + linesOverlay());
   renderSelection(L);
 }
 
@@ -586,6 +601,62 @@ function renderTraced() {
   ul.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', () => { project.traced.splice(+b.dataset.del, 1); renderTraced(); refreshCheck(); save(); }));
 }
 
+// ---------- lines from the scan ----------
+const linesWorker = new Worker(new URL('./linework-worker.js', import.meta.url), { type: 'module' });
+let linesJob = 0;
+$('#lines-run').addEventListener('click', () => {
+  if (!imageEl) return;
+  const btn = $('#lines-run');
+  const W = project.image.width, H = project.image.height;
+  // Up to about 9 MP is read at full detail; bigger scans are read smaller.
+  const scale = Math.min(1, Math.sqrt(9e6 / (W * H)));
+  const c = document.createElement('canvas');
+  c.width = Math.round(W * scale); c.height = Math.round(H * scale);
+  const g = c.getContext('2d', { willReadFrequently: true });
+  g.drawImage(imageEl, 0, 0, c.width, c.height);
+  const data = g.getImageData(0, 0, c.width, c.height).data;
+  const id = ++linesJob;
+  const options = { contrast: +$('#lines-contrast').value, minSize: +$('#lines-size').value, outScale: 1 / scale };
+  btn.disabled = true; btn.textContent = 'Pulling lines…';
+  linesWorker.onmessage = (e) => {
+    if (e.data.id !== linesJob) return;
+    if (e.data.progress) { btn.textContent = `${e.data.progress}…`; return; }
+    btn.disabled = false; btn.textContent = 'Pull lines from scan';
+    if (e.data.error) { toast(`Couldn't pull lines: ${e.data.error}`); return; }
+    const old = new Map((project.linework?.layers || []).map((l) => [l.name, l]));
+    project.linework = {
+      options, imageWidth: W, imageHeight: H, strokeWidth: project.linework?.strokeWidth ?? 2,
+      layers: e.data.result.layers.map((l) => ({ ...l, show: old.get(l.name)?.show ?? true }))
+    };
+    if (!model) project.draw = 'scan';
+    else if (project.draw === 'reference') project.draw = 'both';
+    syncDrawMode(); renderLines(); refreshCheck(); save();
+    toast(project.linework.layers.length ? `Found ${project.linework.layers.length} line ${project.linework.layers.length === 1 ? 'colour' : 'colours'}. Slide “Map image” down to see them, and untick any you don't want.` : 'No lines found. Move “Faint lines” to the left and try again.', 5000);
+  };
+  linesWorker.postMessage({ id, rgba: data.buffer, width: c.width, height: c.height, options }, [data.buffer]);
+});
+function renderLines() {
+  const ul = $('#lines-list');
+  const layers = project.linework?.layers || [];
+  ul.innerHTML = layers.map((l, i) => `<li><input type="color" value="${l.colour}" data-i="${i}"><label><input type="checkbox" data-show="${i}" ${l.show !== false ? 'checked' : ''}> ${esc(l.name)} <small>${Math.round(l.length).toLocaleString()} px</small></label><button data-del="${i}" aria-label="Delete">✕</button></li>`).join('');
+  ul.querySelectorAll('input[type=color]').forEach((inp) => inp.addEventListener('change', () => { project.linework.layers[+inp.dataset.i].colour = inp.value; refreshCheck(); save(); }));
+  ul.querySelectorAll('[data-show]').forEach((inp) => inp.addEventListener('change', () => { project.linework.layers[+inp.dataset.show].show = inp.checked; refreshCheck(); save(); }));
+  ul.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', () => {
+    project.linework.layers.splice(+b.dataset.del, 1);
+    if (!project.linework.layers.length) { project.linework = null; if (project.draw !== 'reference') project.draw = 'reference'; syncDrawMode(); }
+    renderLines(); refreshCheck(); save();
+  }));
+}
+function syncDrawMode() {
+  if (!model && hasLines()) project.draw = 'scan';
+  if (!hasLines()) project.draw = 'reference';
+  document.querySelectorAll('#draw-mode button').forEach((b) => {
+    b.classList.toggle('active', b.dataset.mode === project.draw);
+    b.disabled = b.dataset.mode === 'reference' || b.dataset.mode === 'both' ? !model : !hasLines();
+  });
+}
+document.querySelectorAll('#draw-mode button').forEach((b) => b.addEventListener('click', () => { project.draw = b.dataset.mode; syncDrawMode(); refreshPreview(); save(); }));
+
 // ---------- style and export ----------
 function renderStyleList() {
   const box = $('#style-list');
@@ -615,13 +686,15 @@ let previewTimer = null;
 function schedulePreview() { clearTimeout(previewTimer); previewTimer = setTimeout(refreshPreview, 120); }
 
 async function styledSvg() {
-  const L = await getLayers();
   const style = STYLES.find((s) => s.id === project.style) || STYLES[0];
   const frame = currentFrame();
   const outHeight = project.exportHeight;
   const outWidth = Math.round(frame.w / frame.h * outHeight);
+  if (project.draw === 'scan' || !model) return { svg: buildLineworkSvg(project.linework, style, { frame, outWidth, outHeight }), outWidth, outHeight };
+  const L = await getLayers();
   return {
     svg: buildSvg(L, style, {
+      linework: project.draw === 'both' ? project.linework : null,
       frame, outWidth, outHeight,
       show: { ...project.show, labels: project.show.countryLabels || project.show.placeLabels },
       highlight: project.highlight, fade: project.fade, names: project.names, labelHide: project.labelHide,
@@ -633,7 +706,7 @@ async function styledSvg() {
 
 let previewUrl = null;
 async function refreshPreview() {
-  if (view !== 'style' || !model) return;
+  if (view !== 'style' || (!model && !hasLines())) return;
   const { svg } = await styledSvg();
   if (previewUrl) URL.revokeObjectURL(previewUrl);
   previewUrl = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
@@ -652,6 +725,7 @@ $('#export-png').addEventListener('click', async () => {
   download(`${fileBase()}-${project.style}-${outHeight}p.png`, png, 'image/png');
 });
 $('#export-geojson').addEventListener('click', async () => {
+  if (!model) { toast('GeoJSON needs matching points, so it knows where on Earth the lines are. Use Layered SVG for scan lines.', 5000); return; }
   const L = await getLayers();
   const ref = await getRef(project.detail);
   const ids = new Set(L.countries.map((c) => c.id));

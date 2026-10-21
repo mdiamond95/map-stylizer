@@ -64,6 +64,16 @@
         <h2>Overlay</h2>
         <label class="row">Map image <input id="image-opacity" type="range" min="0" max="1" step="0.05" value="1"></label>
         <label class="row">Vectors <input id="vector-opacity" type="range" min="0" max="1" step="0.05" value="1"></label>
+        <h2>Lines from your scan</h2>
+        <p class="hint">Copies the lines drawn on your map as clean strokes, leaving out lettering, colour fills and the paper. Each ink colour becomes its own layer. No points needed.</p>
+        <div class="lines">
+          <label class="row">Faint lines <input id="lines-contrast" type="range" min="0.08" max="0.35" step="0.01" value="0.18"></label>
+          <label class="row">Lettering <input id="lines-size" type="range" min="0.004" max="0.03" step="0.001" value="0.012"></label>
+          <p class="hint small">Faint lines: left picks up fainter ink. Lettering: right removes bigger lettering and symbols.</p>
+          <button id="lines-run" class="primary">Pull lines from scan</button>
+        </div>
+        <ul id="lines-list" class="traced-list"></ul>
+        <h2>Map data</h2>
         <label class="row">Detail
           <select id="detail"></select>
         </label>
@@ -94,6 +104,10 @@
     <section id="view-style" class="view">
       <div class="preview-wrap"><div id="preview" class="preview"></div></div>
       <aside class="panel side">
+        <h2>Draw</h2>
+        <div id="draw-mode" class="seg" role="group" aria-label="What to draw">
+          <button data-mode="reference">Map data</button><button data-mode="scan">Scan lines</button><button data-mode="both">Both</button>
+        </div>
         <h2>Style</h2>
         <div id="style-list" class="style-list"></div>
         <h2>Frame</h2>

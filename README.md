@@ -29,6 +29,15 @@ shaded empire or a drawn route, are traced from the image.
 Projects autosave in the browser. **Save project** writes a `.mapstyle.json` file (image included)
 that you can keep in this repo or the Files app and open again on any device.
 
+## Lines straight from the scan
+
+To keep the map's own drawing rather than redraw it from map data, open the image, go to **Check**
+and tap **Pull lines from scan**. No points are needed. The drawn lines come out as clean strokes,
+with lettering, colour fills and the paper left out, and each ink colour becomes its own layer (for
+example the street drawing and a red reference grid). Untick a colour to leave it out. In **Style &
+export**, **Draw** picks the scan lines, the map data, or both. The Layered SVG has one group per
+ink colour (`scan-lines-1`, `scan-lines-2`…), as strokes you can recolour or draw on in your editor.
+
 ## City and town maps
 
 When the pinned map covers less than about 60 km, the **Streets** detail level is chosen
