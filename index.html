@@ -67,6 +67,11 @@
         <label class="row">Detail
           <select id="detail"></select>
         </label>
+        <div id="match-box" class="match" hidden>
+          <label class="row"><input type="checkbox" id="match-image"> Only streets drawn on this map</label>
+          <label class="row">Strictness <input id="match-strict" type="range" min="0" max="1" step="0.05" value="0.4"></label>
+          <p class="hint">For old maps: leaves out today's streets that your map doesn't show. Left-out streets are dashed here.</p>
+        </div>
         <h2>Layers</h2>
         <div id="layer-toggles" class="toggles"></div>
         <label class="row">Rivers <input id="river-rank" type="range" min="0" max="10" step="1" value="6"></label>

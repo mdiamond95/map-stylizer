@@ -134,7 +134,7 @@ function cityParts(layers, style, { s, frame, show, opts, line, L }) {
         const text = L.countryCase === 'upper' ? p.name.toUpperCase() : p.name;
         const w = textWidth(text, size, L.letterSpacing) * unit;
         const box = [p.x - w / 2, p.y - size * unit / 2, p.x + w / 2, p.y + size * unit / 2];
-        if (!inside([p.x, p.y], frame) || placed.some((b) => overlaps(b, box))) continue;
+        if (!inside([box[0], box[1]], frame) || !inside([box[2], box[3]], frame) || placed.some((b) => overlaps(b, box))) continue;
         placed.push(box);
         areas += `<text data-name="${esc(p.name)}" x="${fmt(p.x)}" y="${fmt(p.y)}" text-anchor="middle" dominant-baseline="middle" letter-spacing="${s(L.letterSpacing || 0)}" ${attrs(size, L.countryWeight, L.countryStyle)}>${esc(text)}</text>`;
       }
@@ -146,13 +146,18 @@ function cityParts(layers, style, { s, frame, show, opts, line, L }) {
       o.streetNames.slice(0, c.streetLabelLimit).forEach((n, i) => {
         const w = textWidth(n.name, size, 0) * unit;
         if (n.length < w * 1.15) return;
-        // Collision check on the label's middle stretch only; good enough to
-        // stop two names stacking on the same block.
-        const mid = n.points[Math.floor(n.points.length / 2)];
-        const box = [mid[0] - w / 2, mid[1] - size * unit, mid[0] + w / 2, mid[1] + size * unit];
-        if (placed.some((b) => overlaps(b, box))) return;
-        placed.push(box);
-        defsOut.push(`<path id="street-path-${i}" d="${n.d}"/>`);
+        // Only the stretch the text sits on matters: it must be fairly
+        // straight, inside the frame, clear of other labels, and run left to
+        // right so the name reads the right way up.
+        let pts = stretch(n.points, n.length / 2 - w / 2 - size * unit, n.length / 2 + w / 2 + size * unit);
+        if (pts.length < 2 || turning(pts) > Math.PI / 4) return;
+        if (pts[pts.length - 1][0] < pts[0][0]) pts = pts.reverse();
+        const r = size * unit * 0.75;
+        const boxes = alongEvery(pts, size * unit).map((p) => [p[0] - r, p[1] - r, p[0] + r, p[1] + r]);
+        if (!boxes.every((b) => inside([b[0], b[1]], frame) && inside([b[2], b[3]], frame))) return;
+        if (boxes.some((b) => placed.some((q) => overlaps(q, b)))) return;
+        placed.push(...boxes);
+        defsOut.push(`<path id="street-path-${i}" d="M${pts.map((p) => `${fmt(p[0])},${fmt(p[1])}`).join('L')}"/>`);
         streets += `<text id="street-${i}" data-name="${esc(n.name)}" dominant-baseline="middle" ${attrs(size, c.streetLabelWeight)}><textPath href="#street-path-${i}" startOffset="50%" text-anchor="middle">${esc(n.name)}</textPath></text>`;
       });
       streets = defsOut.length ? `<defs>${defsOut.join('')}</defs>${streets}` : '';
@@ -218,6 +223,49 @@ function placePlaceLabels(places, { L, unit, frame, placed, gap }) {
       return;
     }
   });
+  return out;
+}
+
+// The part of a polyline between two distances along it.
+function stretch(pts, a, b) {
+  const out = [];
+  let d = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const p = pts[i - 1], q = pts[i];
+    const len = Math.hypot(q[0] - p[0], q[1] - p[1]);
+    const at = (t) => [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t];
+    if (len && d + len >= a && d <= b) {
+      if (!out.length) out.push(at(Math.max(0, (a - d) / len)));
+      out.push(at(Math.min(1, (b - d) / len)));
+    }
+    d += len;
+  }
+  return out;
+}
+
+// Total bending along a polyline, in radians, ignoring tiny wiggles.
+function turning(pts) {
+  let total = 0, prev = null;
+  for (let i = 1; i < pts.length; i++) {
+    const dx = pts[i][0] - pts[i - 1][0], dy = pts[i][1] - pts[i - 1][1];
+    if (Math.hypot(dx, dy) < 2) continue;
+    const a = Math.atan2(dy, dx);
+    if (prev != null) { let t = Math.abs(a - prev); if (t > Math.PI) t = 2 * Math.PI - t; total += t; }
+    prev = a;
+  }
+  return total;
+}
+
+function alongEvery(pts, step) {
+  const out = [pts[0]];
+  let t = step;
+  for (let i = 1; i < pts.length; i++) {
+    const p = pts[i - 1], q = pts[i];
+    const len = Math.hypot(q[0] - p[0], q[1] - p[1]);
+    for (; t <= len; t += step) out.push([p[0] + (q[0] - p[0]) * t / len, p[1] + (q[1] - p[1]) * t / len]);
+    t -= len;
+  }
+  out.push(pts[pts.length - 1]);
   return out;
 }
 

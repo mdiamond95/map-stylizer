@@ -38,6 +38,11 @@ tiles. The reference map shows streets too, and the search box finds streets, la
 addresses (OpenStreetMap Nominatim), so you can pin street corners. Both need a connection;
 the **Simple** reference map works offline. Exports credit © OpenStreetMap contributors.
 
+For old maps, **Only streets drawn on this map** (on by default in the Check step) compares each
+OpenStreetMap street with the ink on your scan and leaves out the ones the map doesn't show, such as
+modern highways, bridges and suburbs. Left-out streets show dashed in the Check view; raise
+**Strictness** to drop more, lower it to keep more. Street and neighbourhood names follow the kept streets.
+
 Old city maps are rarely true to scale. If the points disagree, set **Fit** to **Rubber sheet**
 and add more points, especially near the edges.
 
@@ -69,7 +74,7 @@ npm test         # georeferencing and rendering checks
 npm run build    # static site in dist/
 ```
 
-Pushing to `main` builds the site and publishes it to the `gh-pages` branch.
+Pushing to `main` runs the tests, builds the site and deploys it to GitHub Pages (Settings → Pages → Source: GitHub Actions).
 Styles are small JSON files in `src/styles/`; reference data is rebuilt with `tools/build-data.sh`.
 
 ## Built on

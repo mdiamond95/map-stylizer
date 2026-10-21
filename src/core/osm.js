@@ -77,7 +77,7 @@ function addTile(out, tile, x, y, z) {
   each('waterway', (p, g) => { if (p.class === 'river' || p.class === 'canal' || p.class === 'stream') out.waterways.push(tag(g(), { class: p.class })); });
   each('transportation', (p, g) => {
     const cls = ROAD_CLASS[p.class];
-    if (cls && p.brunnel !== 'tunnel') out.roads.push(tag(g(), { class: cls }));
+    if (cls && p.brunnel !== 'tunnel') out.roads.push(tag(g(), { class: cls, kind: p.class }));
   });
   each('transportation_name', (p, g) => {
     const cls = ROAD_CLASS[p.class];

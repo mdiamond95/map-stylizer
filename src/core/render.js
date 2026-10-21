@@ -2,6 +2,7 @@
 // fitted transformation -> image pixels, as SVG path data.
 import { geoPath, geoClipRectangle } from 'd3-geo';
 import { makeProjection } from './projections.js';
+import { matchLines, linesToPath, lineLength } from './match.js';
 
 export function makePixelPath(model, width, height, margin = 0.15) {
   const proj = makeProjection(model.projection, model.params);
@@ -30,7 +31,18 @@ export function makePixelPath(model, width, height, margin = 0.15) {
     const xy = proj(ll);
     return xy ? toPixel(xy) : null;
   };
-  return { path, inFrame, point };
+  // The same geometry as polylines, for tests against the image.
+  const lines = (f) => {
+    const out = [];
+    let cur = null;
+    geoPath(pixelProjection, {
+      moveTo(x, y) { cur = [[x, y]]; out.push(cur); },
+      lineTo(x, y) { cur.push([x, y]); },
+      closePath() {}, arc() {}
+    })(f);
+    return out.filter((l) => l.length > 1);
+  };
+  return { path, inFrame, point, lines };
 }
 
 // The image outline, sampled along its edges and taken back into planar
@@ -53,7 +65,7 @@ function planarBox(model, w, h, margin) {
 // Builds every layer in image pixel space. `options` decides how much detail
 // to keep; the style decides how it looks.
 export function buildPixelLayers(ref, model, width, height, options = {}) {
-  const { path, inFrame, point } = makePixelPath(model, width, height);
+  const { path, inFrame, point, lines } = makePixelPath(model, width, height);
   const o = { riverRank: 6, placeRank: 3, placeLimit: 40, provinces: true, ...options };
   const onImage = (p) => p && p[0] >= 0 && p[0] <= width && p[1] >= 0 && p[1] <= height;
 
@@ -87,7 +99,7 @@ export function buildPixelLayers(ref, model, width, height, options = {}) {
 
   return {
     width, height,
-    osm: o.osm ? buildOsmLayers(o.osm, path, point, width, height) : null,
+    osm: o.osm ? buildOsmLayers(o.osm, { path, point, lines }, width, height, o.match) : null,
     countries,
     provinces,
     borders: path(ref.borders) || '',
@@ -99,17 +111,36 @@ export function buildPixelLayers(ref, model, width, height, options = {}) {
 }
 
 // City-scale layers from OpenStreetMap, merged into one path per class so the
-// SVG stays light enough for After Effects.
-function buildOsmLayers(osm, path, point, width, height) {
+// SVG stays light enough for After Effects. With `match`, only the streets
+// drawn on the scanned map are kept (see match.js).
+function buildOsmLayers(osm, { path, point, lines }, width, height, match) {
   const fc = (features) => ({ type: 'FeatureCollection', features });
-  const roads = {};
-  for (const cls of ['major', 'medium', 'minor', 'rail', 'ferry']) roads[cls] = path(fc(osm.roads.filter((r) => r.properties.class === cls))) || '';
   const onImage = (p) => p && p[0] >= 0 && p[0] <= width && p[1] >= 0 && p[1] <= height;
+  const roads = {};
+  const matched = match ? {} : null;
+  let dropped = '';
+  const density = match ? new Density(width, height) : null;
+  for (const cls of ['major', 'medium', 'minor', 'rail', 'ferry']) {
+    const features = osm.roads.filter((r) => r.properties.class === cls);
+    if (!match || cls === 'ferry') { roads[cls] = path(fc(features)) || ''; continue; }
+    // Service roads and tracks are almost never on old maps, and sit close
+    // enough to block outlines to fool the ink test.
+    const keepable = features.filter((r) => !MINOR_EXTRAS.has(r.properties.kind));
+    const all = keepable.flatMap(lines);
+    const r = matchLines(all, match.img, match.scale, match.settings);
+    roads[cls] = linesToPath(r.kept);
+    matched[cls] = r.kept;
+    dropped += linesToPath(r.dropped) + path(fc(features.filter((f) => MINOR_EXTRAS.has(f.properties.kind))));
+    if (cls !== 'rail') { density.add(r.kept, true); density.add(r.dropped, false); }
+  }
   const places = [];
   const seen = new Set();
   for (const f of osm.places) {
     const xy = point(f.geometry.coordinates);
     if (!onImage(xy) || seen.has(f.properties.name)) continue;
+    // A neighbourhood whose streets are nearly all missing from the map
+    // did not exist yet, or was not drawn.
+    if (density && f.properties.class !== 'city' && f.properties.class !== 'town' && density.share(xy) < 0.3) continue;
     seen.add(f.properties.name);
     places.push({ name: f.properties.name, class: f.properties.class, x: xy[0], y: xy[1] });
   }
@@ -119,26 +150,51 @@ function buildOsmLayers(osm, path, point, width, height) {
     parks: path(fc(osm.parks)) || '',
     buildings: path(fc(osm.buildings)) || '',
     roads,
-    streetNames: streetNameCandidates(osm.names, point, onImage),
+    matched,
+    dropped,
+    streetNames: streetNameCandidates(osm.names, point, onImage, match),
     places
   };
 }
 
-// The longest on-image piece of each named street, running left to right so
-// its label reads the right way up.
-function streetNameCandidates(names, point, onImage) {
+const MINOR_EXTRAS = new Set(['service', 'track', 'raceway', 'busway']);
+
+// Kept and total street length on a coarse grid, to judge an area as a whole.
+class Density {
+  constructor(w, h) { this.cell = Math.max(w, h) / 12; this.cols = Math.ceil(w / this.cell) + 1; this.kept = new Map(); this.all = new Map(); }
+  add(lines, kept) {
+    for (const l of lines) {
+      const len = lineLength(l), m = l[Math.floor(l.length / 2)];
+      const k = Math.floor(m[1] / this.cell) * this.cols + Math.floor(m[0] / this.cell);
+      this.all.set(k, (this.all.get(k) || 0) + len);
+      if (kept) this.kept.set(k, (this.kept.get(k) || 0) + len);
+    }
+  }
+  share([x, y]) {
+    let kept = 0, all = 0;
+    const cx = Math.floor(x / this.cell), cy = Math.floor(y / this.cell);
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const k = (cy + dy) * this.cols + cx + dx;
+      kept += this.kept.get(k) || 0; all += this.all.get(k) || 0;
+    }
+    return all ? kept / all : 1;
+  }
+}
+
+// The longest on-image piece of each named street (with `match`, the longest
+// piece drawn on the map). svg.js turns it the right way up.
+function streetNameCandidates(names, point, onImage, match) {
   const best = new Map();
   for (const f of names) {
     const lines = f.geometry.type === 'LineString' ? [f.geometry.coordinates] : f.geometry.type === 'MultiLineString' ? f.geometry.coordinates : [];
     for (const line of lines) {
-      let pts = line.map(point).filter(Boolean);
-      if (pts.length < 2 || !pts.every(onImage)) continue;
-      let length = 0;
-      for (let i = 1; i < pts.length; i++) length += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
-      if (pts[pts.length - 1][0] < pts[0][0]) pts = pts.reverse();
-      const prev = best.get(f.properties.name);
-      if (!prev || prev.length < length) {
-        best.set(f.properties.name, { name: f.properties.name, class: f.properties.class, length, points: pts });
+      const raw = line.map(point).filter(Boolean);
+      if (raw.length < 2 || !raw.every(onImage)) continue;
+      const pieces = match ? matchLines([raw], match.img, match.scale, match.settings).kept : [raw];
+      for (const pts of pieces) {
+        const length = lineLength(pts);
+        const prev = best.get(f.properties.name);
+        if (!prev || prev.length < length) best.set(f.properties.name, { name: f.properties.name, class: f.properties.class, length, points: pts });
       }
     }
   }

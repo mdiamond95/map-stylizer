@@ -5,6 +5,7 @@ import { buildReference, searchPlaces, DETAIL_LEVELS } from './core/reference.js
 import { makePixelPath, buildPixelLayers } from './core/render.js';
 import { loadOsm, makeTileFetcher, OSM_ATTRIBUTION } from './core/osm.js';
 import { buildSvg } from './core/svg.js';
+import { makeInkImage, matchSettings } from './core/match.js';
 import { STYLES } from './styles/index.js';
 import { ImageViewer } from './ui/viewer.js';
 import { RefMap } from './ui/refmap.js';
@@ -39,7 +40,7 @@ function newProject() {
     detail: 'medium',
     detailAuto: true,
     basemap: 'streets',
-    options: { riverRank: 6, placeLimit: 40, placeRank: 4 },
+    options: { riverRank: 6, placeLimit: 40, placeRank: 4, matchImage: true, matchStrictness: 0.4 },
     show: { land: true, borders: true, coastline: true, provinceLines: true, rivers: true, lakes: true, places: true, countryLabels: true, placeLabels: true, graticule: false, buildings: false, traced: true },
     highlight: [], fade: [], names: {}, labelHide: [],
     traced: [],
@@ -280,6 +281,7 @@ function refit() {
     const km = extentKm();
     project.detail = km < 60 ? 'streets' : km < 2500 ? 'high' : 'medium';
     $('#detail').value = project.detail;
+    $('#match-box').hidden = project.detail !== 'streets';
   }
   drawPinOverlay();
 }
@@ -411,6 +413,9 @@ function syncControls() {
   if (project.basemap) refMap.setBasemap(project.basemap);
   syncBasemap();
   $('#river-rank').value = project.options.riverRank;
+  $('#match-image').checked = project.options.matchImage !== false;
+  $('#match-strict').value = project.options.matchStrictness ?? 0.4;
+  $('#match-box').hidden = project.detail !== 'streets';
   $('#place-limit').value = project.options.placeLimit;
   document.querySelectorAll('#layer-toggles input').forEach((i) => { i.checked = !!project.show[i.dataset.layer]; });
   $('#frame-preset').value = project.frame.preset;
@@ -424,7 +429,9 @@ function syncControls() {
 }
 
 $('#project-name').addEventListener('change', (e) => { project.name = e.target.value.trim() || 'Untitled map'; save(); });
-$('#detail').addEventListener('change', (e) => { project.detail = e.target.value; project.detailAuto = false; layersCache = null; drawPinOverlay(); refreshCheck(); save(); });
+$('#detail').addEventListener('change', (e) => { project.detail = e.target.value; project.detailAuto = false; $('#match-box').hidden = project.detail !== 'streets'; layersCache = null; drawPinOverlay(); refreshCheck(); save(); });
+$('#match-image').addEventListener('change', (e) => { project.options.matchImage = e.target.checked; layersCache = null; refreshCheck(); save(); });
+$('#match-strict').addEventListener('change', (e) => { project.options.matchStrictness = +e.target.value; layersCache = null; refreshCheck(); save(); });
 $('#river-rank').addEventListener('change', (e) => { project.options.riverRank = +e.target.value; layersCache = null; refreshCheck(); save(); });
 $('#place-limit').addEventListener('change', (e) => { project.options.placeLimit = +e.target.value; layersCache = null; refreshCheck(); save(); });
 $('#image-opacity').addEventListener('input', (e) => checkViewer.setImageOpacity(e.target.value));
@@ -446,10 +453,31 @@ async function getLayers() {
     placeRank: project.options.placeRank,
     placeLimit: project.options.placeLimit,
     provinces: true,
-    osm
+    osm,
+    match: osm && project.options.matchImage !== false ? getMatch() : null
   });
   layersCache.osmRaw = osm;
   return layersCache;
+}
+
+// Greyscale copy of the scanned map for checking which streets it shows.
+// Capped at about 8 MP; built once per image.
+let inkCache = null;
+function getMatch() {
+  if (!imageEl) return null;
+  const W = project.image.width, H = project.image.height;
+  if (inkCache?.src !== project.image.dataUrl) {
+    const scale = Math.min(1, Math.sqrt(8e6 / (W * H)));
+    const c = document.createElement('canvas');
+    c.width = Math.round(W * scale); c.height = Math.round(H * scale);
+    const g = c.getContext('2d', { willReadFrequently: true });
+    g.drawImage(imageEl, 0, 0, c.width, c.height);
+    inkCache = { src: project.image.dataUrl, scale, img: makeInkImage(g.getImageData(0, 0, c.width, c.height).data, c.width, c.height) };
+  }
+  // Search across each street by more when the points disagree more.
+  const err = model.looRmse ?? model.rmse ?? 0;
+  const tolerance = Math.hypot(W, H) * 0.003 + err * 0.5;
+  return { img: inkCache.img, scale: inkCache.scale, settings: matchSettings(project.options.matchStrictness ?? 0.4, tolerance) };
 }
 
 async function refreshCheck() {
@@ -464,6 +492,7 @@ async function refreshCheck() {
     out += `<path class="ck-park" d="${o.parks}"/><path class="ck-water" d="${o.water}"/>`;
     if (sh.buildings) out += `<path class="ck-building" d="${o.buildings}"/>`;
     if (sh.rivers) out += `<path class="ck-river" d="${o.waterways}"/>`;
+    if (o.dropped) out += `<path class="ck-dropped" d="${o.dropped}"/>`;
     out += `<path class="ck-road-minor" d="${o.roads.minor}"/><path class="ck-road" d="${o.roads.medium}"/><path class="ck-road-major" d="${o.roads.major}"/><path class="ck-rail" d="${o.roads.rail}"/>`;
     if (sh.traced) out += project.traced.map((t) => `<g class="ck-traced">${t.paths.map((d) => `<path d="${d}" fill="${t.fill}"/>`).join('')}</g>`).join('');
     checkViewer.setOverlay(out);
@@ -539,7 +568,7 @@ $('#trace').addEventListener('click', async () => {
   try {
     const { paths, coverage } = await traceColour(imageEl, project.image.width, project.image.height, pickedColour, +$('#tolerance').value);
     if (!paths.length) { toast('Nothing matched that colour. Try a higher tolerance.'); return; }
-    if (coverage > 0.6) toast('That colour covers most of the map; try a lower tolerance.');
+    if (coverage > 0.3) toast(`That colour covers ${Math.round(coverage * 100)}% of the map, so it is probably the paper or background. The streets, water and parks already come from OpenStreetMap; tracing is for things like a shaded area or a drawn route. You can delete it with ✕ below.`, 9000);
     const hex = '#' + pickedColour.map((v) => v.toString(16).padStart(2, '0')).join('');
     project.traced.push({ name: $('#trace-name').value.trim() || `Traced ${project.traced.length + 1}`, fill: hex, paths });
     $('#trace-name').value = '';
@@ -636,7 +665,15 @@ $('#export-geojson').addEventListener('click', async () => {
   const osm = L.osmRaw;
   if (osm) {
     const add = (layer, list) => list.forEach((f) => features.push({ type: 'Feature', geometry: f.geometry, properties: { layer, ...(f.properties || {}) } }));
-    add('roads', osm.roads); add('water', osm.water); add('waterways', osm.waterways); add('parks', osm.parks); add('places', osm.places);
+    // With matching on, export only the streets kept, taken back to lon/lat.
+    const matched = L.osm?.matched;
+    if (matched) {
+      for (const [cls, lines] of Object.entries(matched)) {
+        const coords = lines.map((l) => l.map((p) => model.pixelToLonlat(p)).filter((q) => q && isFinite(q[0])));
+        if (coords.length) features.push({ type: 'Feature', geometry: { type: 'MultiLineString', coordinates: coords }, properties: { layer: 'roads', class: cls, matched: true } });
+      }
+    } else add('roads', osm.roads);
+    add('water', osm.water); add('waterways', osm.waterways); add('parks', osm.parks); add('places', osm.places);
   }
   const source = osm ? `Natural Earth (public domain); ${OSM_ATTRIBUTION} (ODbL)` : 'Natural Earth (public domain)';
   const fc = { type: 'FeatureCollection', properties: { source, georef: project.georef }, features };
