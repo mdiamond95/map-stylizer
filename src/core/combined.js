@@ -281,6 +281,11 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
   const under = routeEdges({ stretches, strong: filled.strong, blocks: filled.blocks, edges: filled.edges, known: filled.edges.concat(filled.inferred, kept.fill), w, h, k });
   filled.edges = under.edges;
   filled.inferred.push(...under.lines);
+  // Dashed street edges traced as solid go to the dashed lines.
+  const dashRuns = dashedRuns(filled.edges, inkImg, w, h, k);
+  filled.edges = dashRuns.solid;
+  dashed.push(...dashRuns.dashed);
+  if (dbg) dbg['dashed runs'] = dashRuns.dashed;
   if (dbg) Object.assign(dbg, { 'route edges': under.lines, 'route junk': under.junk, 'route sides': sideLines(stretches), routes, strong: filled.strong, blocks: filled.blocks, 'known': filled.edges.concat(filled.inferred, kept.fill), streetWidth: new Float32Array([even.width]) });
 
   onProgress?.('Sorting layers');
@@ -860,6 +865,70 @@ export function gridLines(colour, w, h, k, neat) {
     }
   }
   return out;
+}
+
+// Dashed street edges the tracers followed as if solid. Each line is split
+// into straight runs, and each run's ink is read along it: a dashed line
+// dips to paper briefly and evenly (short gaps between ink at least as
+// long), where a solid line stays dark, and a line just off its ink fades
+// for long stretches instead. A run is taken as dashed when it dips like
+// that and either does so many times, evenly, or has another such run close
+// by (dashed streets come in families; a lettering stroke that happens to
+// dip is usually alone). Dashed runs leave the line as straight lines of
+// their own. Returns { solid, dashed }.
+function dashedRuns(lines, img, w, h, k) {
+  const dark = (x, y) => { const i = idx(x, y, w, h), xi = i % w; return 1 - img.gray[i] / Math.max(1, paperAt(img, xi, (i - xi) / w)); };
+  const runsOf = (l) => {
+    const out = [];
+    let from = 0;
+    for (let i = 1; i < l.length - 1; i++) if (bend(l[i - 1], l[i], l[i + 1]) > Math.PI / 6) { out.push([from, i]); from = i; }
+    out.push([from, l.length - 1]);
+    return out;
+  };
+  const dips = (a, b) => {
+    const len = Math.hypot(b[0] - a[0], b[1] - a[1]), ux = (b[0] - a[0]) / len, uy = (b[1] - a[1]) / len;
+    let best = null, bestMean = -1;
+    for (let off = -3; off <= 3; off += 0.5) {
+      const prof = [];
+      for (let t = 0; t <= len; t++) {
+        let m = 0;
+        for (let o = off - 1; o <= off + 1; o += 0.5) m = Math.max(m, dark(a[0] + ux * t - uy * o, a[1] + uy * t + ux * o));
+        prof.push(m);
+      }
+      const mean = prof.reduce((s, v) => s + v, 0) / prof.length;
+      if (mean > bestMean) { bestMean = mean; best = prof; }
+    }
+    const runs = [];
+    for (let i = 0; i < best.length; ) { let j = i; const on = best[i] > 0.25; while (j < best.length && (best[j] > 0.25) === on) j++; runs.push([on, i, j]); i = j; }
+    const at = [];
+    for (let q = 1; q < runs.length - 1; q++) { const [on, i, j] = runs[q]; if (!on && j - i <= 5 && runs[q - 1][2] - runs[q - 1][1] >= 3 && runs[q + 1][2] - runs[q + 1][1] >= 3) at.push((i + j) / 2); }
+    const gaps = at.slice(1).map((v, i) => v - at[i]), mean = gaps.reduce((s, v) => s + v, 0) / (gaps.length || 1);
+    const spread = gaps.length > 1 ? Math.sqrt(gaps.reduce((s, v) => s + (v - mean) ** 2, 0) / gaps.length) / mean : 9;
+    return { count: at.length, per100: (100 * at.length) / len, spread };
+  };
+  const cand = [];
+  lines.forEach((l, li) => {
+    for (const [i, j] of runsOf(l)) {
+      const a = l[i], b = l[j];
+      if (Math.hypot(b[0] - a[0], b[1] - a[1]) < 25 * k) continue;
+      const d = dips(a, b);
+      if (d.count >= 2 && d.per100 >= 3.5 && (d.count < 3 || d.spread < 0.5)) cand.push({ li, i, j, mid: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], ends: [a, b], strong: d.count >= 4 && d.spread < 0.3 });
+    }
+  });
+  const near = (p, q) => q.ends.some((e) => p.ends.some((f) => Math.hypot(e[0] - f[0], e[1] - f[1]) < 30 * k)) || Math.hypot(p.mid[0] - q.mid[0], p.mid[1] - q.mid[1]) < 30 * k;
+  const chosen = cand.filter((p) => p.strong || cand.some((q) => q !== p && near(p, q)));
+  const cut = new Map();
+  for (const c of chosen) { if (!cut.has(c.li)) cut.set(c.li, []); cut.get(c.li).push([c.i, c.j]); }
+  const solid = [], dashed = chosen.map((c) => c.ends);
+  lines.forEach((l, li) => {
+    const cs = cut.get(li);
+    if (!cs) { solid.push(l); return; }
+    cs.sort((p, q) => p[0] - q[0]);
+    let from = 0;
+    for (const [i, j] of cs) { if (i > from) solid.push(l.slice(from, i + 1)); from = j; }
+    if (from < l.length - 1) solid.push(l.slice(from));
+  });
+  return { solid, dashed };
 }
 
 // The street edges a tram route hides. A route runs down the middle of its
