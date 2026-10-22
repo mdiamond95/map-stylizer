@@ -142,7 +142,7 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
     // A big open area can have one side running along hatching: that side is cut off.
     shapes.push(...cutJagged(p, texture, w, h, k));
   }
-  if (dbg) Object.assign(dbg, { texture, ink: ink.slice(), fill: fill.slice() });
+  if (dbg) Object.assign(dbg, { texture, ink: ink.slice(), fill: fill.slice(), colourInk });
 
   onProgress?.('Finding the streets');
   const blockNear = dilate(blockMask, w, h, 1);
@@ -292,8 +292,19 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
   }
   // Lines in a second ink colour (a red grid, tram routes) pass through as
   // their own layers, one per colour.
+  // The reference grid printed over the map: dead straight lines from edge
+  // to edge, found by two methods that must agree, and drawn exactly
+  // straight. The rest of the coloured ink (tram routes) is traced without it.
+  const grid = gridLines(colourInk, w, h, k, frame.neat);
+  // Shown where the map shows it: not across the title and legend boxes.
+  const gridShown = grid.flatMap((l) => splitOff(l, crop, w, h, 20 * k));
+  if (gridShown.length) {
+    const c = inkColourAlong(grid[0], rgba, colourInk, w, h);
+    layers.push(layer('Grid lines', hex(c), gridShown));
+  }
+  const gridBand = dilate(rasterise(grid, w, h), w, h, r(4));
   const byColour = new Map();
-  for (const l of plain.lines.filter(isColour)) {
+  for (const l of plain.lines.filter(isColour).flatMap((l) => splitOff(l, gridBand, w, h, 12 * k))) {
     const c = inkColourAlong(l, rgba, colourInk, w, h);
     const name = `${colourName(c).replace(/^Dark (.)/, (_, ch) => ch.toUpperCase())} lines`;
     if (!byColour.has(name)) byColour.set(name, { lines: [], sum: [0, 0, 0], n: 0 });
@@ -777,6 +788,99 @@ function edgeLines(fill, crop, w, h) {
   return prune(traceSkeleton(edge, w, h), 4, 12).map((l) => simplify(l, 1.2)).filter((l) => lineLength(l) > 10);
 }
 
+// ---------- reference grid ----------
+
+// Two ways to find the grid: (a) long runs of coloured ink lined up along
+// one row or column, (b) a vote over every near-level and near-upright line
+// position and angle (a Hough transform). A grid line is kept where both
+// put one, then fitted through the coloured ink along it.
+export function gridLines(colour, w, h, k, neat) {
+  const out = [];
+  for (const across of [true, false]) {
+    const [len, size] = across ? [w, h] : [h, w];
+    const at = across ? (a, b) => colour[b * w + a] : (a, b) => colour[a * w + b];
+    // (a) Hough votes for lines within 2 degrees of level/upright.
+    const angles = [];
+    for (let t = -2; t <= 2.0001; t += 0.1) angles.push(t * Math.PI / 180);
+    const acc = angles.map(() => new Float32Array(size + 200));
+    for (let a = 0; a < len; a += 2) for (let b = 0; b < size; b++) {
+      if (!at(a, b)) continue;
+      angles.forEach((t, j) => { const rho = Math.round(b - (a - len / 2) * Math.tan(t)) + 100; if (rho >= 0 && rho < size + 200) acc[j][rho] += 2; });
+    }
+    const cand = [];
+    acc.forEach((row, j) => {
+      for (let i = 1; i < row.length - 1; i++) if (row[i] >= 0.08 * len && row[i] >= row[i - 1] && row[i] >= row[i + 1]) cand.push({ pos: i - 100, t: angles[j], votes: row[i] });
+    });
+    cand.sort((p, q) => q.votes - p.votes);
+    const peaks = [];
+    for (const c of cand) if (!peaks.some((p) => Math.abs(p.pos - c.pos) <= 20 * k)) peaks.push(c);
+    // (b) Long straight runs of coloured ink (gaps where a street crosses
+    // are bridged) lying along the line over at least half the sheet; a tram
+    // route turns corners and doesn't.
+    const runs = straightRuns(colour, w, h, Math.round(60 * k), across, Math.round(14 * k)).filter((s) => s[3] <= 8 * k + 3);
+    const lined = peaks.filter((p) => {
+      let lo = len, hi = 0, cover = 0;
+      for (const [a0, a1, mid] of runs) {
+        const am = (a0 + a1) / 2, c = p.pos + (am - len / 2) * Math.tan(p.t);
+        if (Math.abs(mid - c) > 4 * k) continue;
+        cover += a1 - a0; lo = Math.min(lo, a0); hi = Math.max(hi, a1);
+      }
+      return cover > 0.12 * len && hi - lo > 0.2 * len;
+    });
+    if (process.env.GRIDDEBUG) console.error(across ? 'H' : 'V', peaks.slice(0, 20).map((p) => [p.pos, +(p.t * 180 / Math.PI).toFixed(1), p.votes, lined.includes(p) ? 'L' : '']));
+    // (c) Grid lines are evenly spaced. The spacing comes from lines both
+    // (a) and (b) are sure of; a line is kept when two of the three agree.
+    const voted = (p) => p.votes >= 0.25 * len;
+    const sure = peaks.filter((p) => voted(p) && lined.includes(p)).map((p) => p.pos).sort((p, q) => p - q);
+    const gaps = [];
+    for (let i = 1; i < sure.length; i++) gaps.push(sure[i] - sure[i - 1]);
+    let step = 0, best = 0;
+    for (const g of gaps) { const m = gaps.filter((q) => Math.abs(q / g - Math.round(q / g)) * g <= 10 * k).length; if (m > best && g > 50 * k) { best = m; step = g; } }
+    const even = (p) => step > 0 && sure.length >= 2 && sure.some((q) => Math.abs(q - p.pos) > step / 2 && Math.abs(Math.abs(q - p.pos) / step - Math.round(Math.abs(q - p.pos) / step)) * step <= 8 * k);
+    const fits = [];
+    const nearBorder = (pos) => neat && (across ? pos < neat[1] + 15 * k || pos > neat[3] - 15 * k : pos < neat[0] + 15 * k || pos > neat[2] - 15 * k);
+    for (const b of peaks) {
+      if (voted(b) + lined.includes(b) + even(b) < 2 || nearBorder(b.pos)) continue;
+      // Fit position and slope through the coloured ink near the agreed line.
+      let sa = 0, sb = 0, saa = 0, sab = 0, m = 0, lo = len, hi = 0;
+      for (let a = 0; a < len; a++) {
+        const centre = b.pos + (a - len / 2) * Math.tan(b.t);
+        for (let d = -Math.round(5 * k); d <= Math.round(5 * k); d++) {
+          const bb = Math.round(centre + d);
+          if (bb < 0 || bb >= size || !at(a, bb)) continue;
+          sa += a; sb += bb; saa += a * a; sab += a * bb; m++; lo = Math.min(lo, a); hi = Math.max(hi, a);
+        }
+      }
+      if (m < 10) continue;
+      const slope = (m * sab - sa * sb) / (m * saa - sa * sa || 1), icpt = (sb - slope * sa) / m;
+      fits.push({ slope, icpt, lo, hi });
+    }
+    // All grid lines run (nearly) the same way: drop any at odds with the rest.
+    const slopes = fits.map((f) => f.slope).sort((p, q) => p - q), mid = slopes[Math.floor(slopes.length / 2)];
+    for (const { slope, icpt, lo, hi } of fits) {
+      if (Math.abs(slope - mid) > 0.006) continue;
+      // Run it across the map inside the border, or over the ink it covers.
+      const a0 = neat ? (across ? neat[0] : neat[1]) : lo, a1 = neat ? (across ? neat[2] : neat[3]) : hi;
+      const p0 = [a0, icpt + slope * a0], p1 = [a1, icpt + slope * a1];
+      out.push(across ? [p0, p1] : [[p0[1], p0[0]], [p1[1], p1[0]]]);
+    }
+  }
+  return out;
+}
+
+// The parts of a line outside a mask, as lines of at least minLen.
+function splitOff(l, mask, w, h, minLen) {
+  const total = lineLength(l), step = 2, out = [];
+  const pts = samplePath(l, 0, total, step);
+  let start = -1;
+  for (let i = 0; i <= pts.length; i++) {
+    const inside = i === pts.length || mask[idx(pts[i][0], pts[i][1], w, h)];
+    if (!inside && start < 0) start = i;
+    if (inside && start >= 0) { const piece = subPath(l, start * step, Math.min(total, i * step)); if (lineLength(piece) >= minLen) out.push(piece); start = -1; }
+  }
+  return out;
+}
+
 // ---------- pictures on the water ----------
 
 function hasLandNeighbour(land, i, w, h) {
@@ -809,17 +913,18 @@ function sailsToWater(fill, ink, w, h, k) {
 
 // Long straight lines, found as runs of ink (a pixel either side counts, so
 // a line a little off level still runs on), joined across rows into lines.
-export function straightRuns(ink, w, h, minLen, across) {
+export function straightRuns(ink, w, h, minLen, across, maxGap = 0) {
   const [len, lines] = across ? [w, h] : [h, w];
   const at = across ? (a, b) => ink[b * w + a] : (a, b) => ink[a * w + b];
   const segs = [], open = new Map();
   for (let b = 0; b < lines; b++) {
     const runs = [];
-    let start = -1;
+    let start = -1, last = -1;
     for (let a = 0; a <= len; a++) {
       const on = a < len && (at(a, b) || (b > 0 && at(a, b - 1)) || (b < lines - 1 && at(a, b + 1)));
-      if (on && start < 0) start = a;
-      if (!on && start >= 0) { if (a - start >= minLen) runs.push([start, a - 1]); start = -1; }
+      if (on) { if (start < 0) start = a; last = a; }
+      // A gap up to maxGap (a street crossing over the line) doesn't end the run.
+      else if (start >= 0 && (a - last > maxGap || a === len)) { if (last - start + 1 >= minLen) runs.push([start, last]); start = -1; }
     }
     const next = new Map();
     for (const [a0, a1] of runs) {
