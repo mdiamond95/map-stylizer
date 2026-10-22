@@ -83,6 +83,11 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
   const maxw = new Float32Array(pc.count + 1);
   for (let i = 0; i < n; i++) { const l = pc.label[i]; if (l && depth[i] > maxw[l]) maxw[l] = depth[i]; }
   const crop = boxesOfPrint(ink, pc, w, h);
+  // The map's border and the framed boxes on it (the title, legends) are
+  // found from their long straight sides; nothing in them is map.
+  const frame = framesAndBoxes(ink, w, h, k);
+  for (let i = 0; i < n; i++) if (frame.crop[i]) crop[i] = 1;
+  if (dbg) dbg.boxes = frame.boxes.map(([x0, y0, x1, y1]) => [[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]]);
   const blocks = new Uint8Array(n), streets = new Uint8Array(n);
   const kind = new Uint8Array(pc.count + 1); // 1 block, 2 street
   for (let l = 1; l <= pc.count; l++) {
@@ -243,6 +248,10 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
   };
   const main = plain.layers[0];
   const layers = [layer('Street and block edges', main?.colour || '#2b2f3a', filled.edges)];
+  if (frame.neat) {
+    const [x0, y0, x1, y1] = frame.neat;
+    layers.push({ ...layer('Map border', main?.colour || '#2b2f3a', [[[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]]]), show: false });
+  }
   // Filled-in lines are guesses, so they get a colour of their own to check
   // them by; recolour the layer to match once happy.
   layers.push(layer('Filled-in lines', '#8a3ffc', filled.inferred));
@@ -742,6 +751,81 @@ function edgeLines(fill, crop, w, h) {
   for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) { const i = y * w + x; if (fill[i] && !inner[i] && !crop[i]) edge[i] = 1; }
   thin(edge, w, h);
   return prune(traceSkeleton(edge, w, h), 4, 12).map((l) => simplify(l, 1.2)).filter((l) => lineLength(l) > 10);
+}
+
+// ---------- border and boxes ----------
+
+// Long straight lines, found as runs of ink (a pixel either side counts, so
+// a line a little off level still runs on), joined across rows into lines.
+export function straightRuns(ink, w, h, minLen, across) {
+  const [len, lines] = across ? [w, h] : [h, w];
+  const at = across ? (a, b) => ink[b * w + a] : (a, b) => ink[a * w + b];
+  const segs = [], open = new Map();
+  for (let b = 0; b < lines; b++) {
+    const runs = [];
+    let start = -1;
+    for (let a = 0; a <= len; a++) {
+      const on = a < len && (at(a, b) || (b > 0 && at(a, b - 1)) || (b < lines - 1 && at(a, b + 1)));
+      if (on && start < 0) start = a;
+      if (!on && start >= 0) { if (a - start >= minLen) runs.push([start, a - 1]); start = -1; }
+    }
+    const next = new Map();
+    for (const [a0, a1] of runs) {
+      let seg = null;
+      for (const [key, s] of open) if (s.a0 < a1 && a0 < s.a1 && !seg) { seg = s; open.delete(key); }
+      if (!seg) { seg = { a0, a1, b0: b, b1: b }; segs.push(seg); }
+      seg.a0 = Math.min(seg.a0, a0); seg.a1 = Math.max(seg.a1, a1); seg.b1 = b;
+      next.set(seg, seg);
+    }
+    open.clear();
+    for (const s of next.values()) open.set(s, s);
+  }
+  // [start, end, middle across, thickness]
+  return segs.map((s) => [s.a0, s.a1, (s.b0 + s.b1) / 2, s.b1 - s.b0 + 1]);
+}
+
+// The map's border (the innermost long line near each edge of the sheet)
+// and boxes drawn with four straight sides and little ink inside (a title, a
+// legend). Returns a mask of what's outside the border or in a box.
+export function framesAndBoxes(ink, w, h, k) {
+  const minLen = Math.round(100 * k), tol = 10 * k;
+  const H = straightRuns(ink, w, h, minLen, true).filter((s) => s[3] <= 40 * k);
+  const V = straightRuns(ink, w, h, minLen, false).filter((s) => s[3] <= 40 * k);
+  const edge = 0.08;
+  // The border is often a band of lines; its inner edge counts.
+  const pick = (segs, size, along, near) => segs.filter((s) => s[1] - s[0] > 0.5 * along && (near ? s[2] < edge * size : s[2] > (1 - edge) * size)).map((s) => s[2] + (near ? 1 : -1) * s[3] / 2);
+  const top = pick(H, h, w, true), bottom = pick(H, h, w, false), left = pick(V, w, h, true), right = pick(V, w, h, false);
+  const neat = top.length && bottom.length && left.length && right.length ? [Math.max(...left), Math.max(...top), Math.min(...right), Math.min(...bottom)] : null;
+  const boxes = [];
+  for (const [ax0, ax1, ay] of H) for (const [bx0, bx1, by] of H) {
+    if (by <= ay + 60 * k) continue;
+    const x0 = Math.max(ax0, bx0), x1 = Math.min(ax1, bx1);
+    if (x1 - x0 < 0.8 * Math.max(ax1 - ax0, bx1 - bx0)) continue;
+    const l = Math.min(ax0, bx0), r = Math.max(ax1, bx1);
+    // A side may be in several pieces where lettering touches it.
+    const side = (x) => {
+      const span = V.filter(([vy0, vy1, vx]) => Math.abs(vx - x) <= 1.5 * tol && vy1 > ay && vy0 < by).map(([vy0, vy1]) => [Math.max(ay, vy0), Math.min(by, vy1)]).sort((p, q) => p[0] - q[0]);
+      let covered = 0, end = ay;
+      for (const [a, b] of span) { if (b > end) { covered += b - Math.max(a, end); end = b; } }
+      return covered >= 0.9 * (by - ay);
+    };
+    if (!side(l) || !side(r)) continue;
+    const area = (r - l) * (by - ay);
+    if (area < 0.001 * w * h || area > 0.2 * w * h) continue;
+    if (neat && l <= neat[0] + tol && r >= neat[2] - tol) continue;
+    // Dense woods also have straight edges; a box is mostly paper inside.
+    let inkIn = 0, m = 0;
+    for (let y = Math.round(ay); y < by; y += 3) for (let x = l; x < r; x += 3) { inkIn += ink[y * w + x]; m++; }
+    if (inkIn / m > 0.4) continue;
+    if (!boxes.some((b) => Math.abs(b[0] - l) < 20 * k && Math.abs(b[1] - ay) < 20 * k && Math.abs(b[2] - r) < 20 * k && Math.abs(b[3] - by) < 20 * k)) boxes.push([l, Math.round(ay), r, Math.round(by)]);
+  }
+  const crop = new Uint8Array(w * h), pad = Math.round(6 * k);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const out = neat && (x < neat[0] + pad || y < neat[1] + pad || x > neat[2] - pad || y > neat[3] - pad);
+    const inBox = boxes.some(([x0, y0, x1, y1]) => x >= x0 - pad && x <= x1 + pad && y >= y0 - pad && y <= y1 + pad);
+    if (out || inBox) crop[y * w + x] = 1;
+  }
+  return { crop, neat, boxes };
 }
 
 // ---------- hill shading ----------
