@@ -73,6 +73,28 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
   const closed = close(fill, w, h, r(5));
   for (let i = 0; i < n; i++) if (closed[i] && ink[i]) fill[i] = 1;
   fill = open(fill, w, h, 1);
+  // Pictures on the water (ships, sailboats, the compass rose) are drawings,
+  // not map. Ships are mostly ink and already count as water; a sailboat's
+  // paper sails leave a hole in the water with lines drawn inside it, which
+  // an island doesn't have.
+  sailsToWater(fill, ink, w, h, k);
+  // Thin lines drawn out on the water (the compass rose, rigging) are water
+  // too: anything dry there narrower than a pier.
+  {
+    const dry = new Uint8Array(n);
+    for (let i = 0; i < n; i++) dry[i] = fill[i] ? 0 : 1;
+    // Piers are narrow too, but they're joined to the land.
+    const land = open(dry, w, h, 2), landNear = dilate(land, w, h, 2);
+    const wet = dilate(fill, w, h, 3);
+    const thin = new Uint8Array(n);
+    for (let i = 0; i < n; i++) if (dry[i] && !land[i] && wet[i]) thin[i] = 1;
+    const tc = components(thin, w, h, true);
+    const joined = new Uint8Array(tc.count + 1);
+    for (let i = 0; i < n; i++) if (tc.label[i] && landNear[i] && hasLandNeighbour(land, i, w, h)) joined[tc.label[i]] = 1;
+    for (let i = 0; i < n; i++) if (tc.label[i] && !joined[tc.label[i]]) fill[i] = 1;
+  }
+  // Lines well out on the water belong to such pictures.
+  const deepWater = erode(fill, w, h, r(3));
 
   onProgress?.('Finding blocks');
   const inkWide = dilate(ink, w, h, 1);
@@ -120,7 +142,7 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
     // A big open area can have one side running along hatching: that side is cut off.
     shapes.push(...cutJagged(p, texture, w, h, k));
   }
-  if (dbg) Object.assign(dbg, { texture, ink: ink.slice() });
+  if (dbg) Object.assign(dbg, { texture, ink: ink.slice(), fill: fill.slice() });
 
   onProgress?.('Finding the streets');
   const blockNear = dilate(blockMask, w, h, 1);
@@ -171,7 +193,8 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
   const railBand = dilate(rasterise(rails, w, h), w, h, R + r(3));
   const piece = 8 * k, longRun = 60 * k;
   const accepted = new Uint8Array(n);
-  const kept = { edges: [], fill: [] }, unsure = [];
+  const kept = { edges: [], fill: [] };
+  let unsure = [];
   // Most trustworthy geometry first; later sources only fill in what is left.
   const sources = [['shape', shapes], ['colour', fillEdges], ['masked', maskedLines], ['plain', plainLines]];
   const doubted = new Uint8Array(n);
@@ -189,7 +212,7 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
         if (p < pieces) {
           const pts = samplePath(line, p * total / pieces, (p + 1) * total / pieces, 2);
           const frac = (m) => pts.reduce((s, [x, y]) => s + m[idx(x, y, w, h)], 0) / pts.length;
-          if (frac(crop) > 0.5 || frac(near) >= 0.6 || frac(railBand) >= 0.6) { keep = false; }
+          if (frac(crop) > 0.5 || frac(near) >= 0.6 || frac(railBand) >= 0.6 || frac(deepWater) >= 0.6) { keep = false; }
           else {
             const vInk = ((frac(support.plain) >= 0.6) + (frac(support.masked) >= 0.6)) / 2;
             const vShape = frac(support.shape) >= 0.6 ? 1 : 0, vColour = frac(support.colour) >= 0.6 ? 1 : 0;
@@ -215,6 +238,7 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
   // already kept (hillside hatching doesn't). Twice, so a road can grow out
   // along a chain of them. Not in the margin (the map's frame), round boxes
   // of print or along grid lines.
+  unsure = unsure.filter((l) => meanAlong(l, deepWater, w, h) < 0.6);
   let unsureLeft = unsure.filter((l) => {
     const len = lineLength(l);
     const straight = Math.hypot(l[l.length - 1][0] - l[0][0], l[l.length - 1][1] - l[0][1]) / (len || 1);
@@ -751,6 +775,34 @@ function edgeLines(fill, crop, w, h) {
   for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) { const i = y * w + x; if (fill[i] && !inner[i] && !crop[i]) edge[i] = 1; }
   thin(edge, w, h);
   return prune(traceSkeleton(edge, w, h), 4, 12).map((l) => simplify(l, 1.2)).filter((l) => lineLength(l) > 10);
+}
+
+// ---------- pictures on the water ----------
+
+function hasLandNeighbour(land, i, w, h) {
+  const x = i % w, y = (i - x) / w;
+  for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+    const xx = x + dx, yy = y + dy;
+    if (xx >= 0 && yy >= 0 && xx < w && yy < h && land[yy * w + xx]) return true;
+  }
+  return false;
+}
+
+// Holes in the water that are drawings (sails with rigging drawn on them)
+// become water. An island's paper is plain inside its shoreline.
+function sailsToWater(fill, ink, w, h, k) {
+  const dry = new Uint8Array(w * h);
+  for (let i = 0; i < dry.length; i++) dry[i] = fill[i] ? 0 : 1;
+  const c = components(dry, w, h, false);
+  const inner = erode(dry, w, h, 3);
+  const inkN = new Uint32Array(c.count + 1), innerInk = new Uint32Array(c.count + 1);
+  for (let i = 0; i < dry.length; i++) { const l = c.label[i]; if (l && ink[i]) { inkN[l]++; if (inner[i]) innerInk[l]++; } }
+  for (let l = 1; l <= c.count; l++) {
+    if (!c.x0[l] || !c.y0[l] || c.x1[l] === w - 1 || c.y1[l] === h - 1) continue;
+    if (c.area[l] < 300 * k * k || c.area[l] > 0.003 * w * h) continue;
+    if (inkN[l] / c.area[l] < 0.15 || innerInk[l] / (inkN[l] || 1) < 0.3) continue;
+    for (let y = c.y0[l]; y <= c.y1[l]; y++) for (let x = c.x0[l]; x <= c.x1[l]; x++) if (c.label[y * w + x] === l) fill[y * w + x] = 1;
+  }
 }
 
 // ---------- border and boxes ----------
