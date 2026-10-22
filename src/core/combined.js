@@ -258,11 +258,30 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
   const even = evenOut([kept.edges.concat(gaps)], spaceDepth, centres, w, h, k);
   unsureLeft = unsureLeft.concat(even.dropped);
 
+  // Lines in a second ink colour: the reference grid printed over the map,
+  // dead straight lines from edge to edge, found by methods that must agree
+  // and drawn exactly straight, shown where the map shows it (not across the
+  // title and legend boxes).
+  const grid = gridLines(colourInk, w, h, k, frame.neat);
+  const gridShown = grid.flatMap((l) => splitOff(l, crop, w, h, 20 * k));
+  const gridBand = dilate(rasterise(grid, w, h), w, h, r(4));
+  // Tram routes: the coloured ink left once the grid is out, with the
+  // route-number badges and arrows closed into the line so one joined line
+  // runs through them, across the gaps where a street crosses.
+  const routes = routeLines(colourInk, A, B, gridBand, crop, deepWater, w, h, k).map((l) => trimHooks(flattenBumps(l, even.width), even.width));
+  const stretches = routeSides(routes, strongInk(inkImg, ink, w, h), even.groups[0].concat(kept.fill), even.width, w, h, k);
+
   onProgress?.('Filling in missing lines');
   // Not along railways or dashed lines, which have layers of their own.
   const avoid = dilate(rasterise(rails.concat(dashed), w, h), w, h, R + r(3));
-  const filled = fillIn({ inkImg, ink, colourInk, fill, crop, blockMask, avoid, edges: even.groups[0], shore: kept.fill, w, h, k });
+  const filled = fillIn({ inkImg, ink, colourInk, gridBand, hints: sideLines(stretches), fill, crop, blockMask, avoid, edges: even.groups[0], shore: kept.fill, w, h, k });
   unsureLeft = unsureLeft.concat(filled.creases);
+
+  // The street edges the routes hide.
+  const under = routeEdges({ stretches, strong: filled.strong, blocks: filled.blocks, edges: filled.edges, known: filled.edges.concat(filled.inferred, kept.fill), w, h, k });
+  filled.edges = under.edges;
+  filled.inferred.push(...under.lines);
+  if (dbg) Object.assign(dbg, { 'route edges': under.lines, 'route junk': under.junk, 'route sides': sideLines(stretches), routes, strong: filled.strong, blocks: filled.blocks, 'known': filled.edges.concat(filled.inferred, kept.fill), streetWidth: new Float32Array([even.width]) });
 
   onProgress?.('Sorting layers');
   const scaled = (ls) => ls.filter((l) => l.length > 1).map((l) => l.map(([x, y]) => [x * out, y * out]));
@@ -290,27 +309,8 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
     const areas = layer(water ? 'Water' : `${colourName(c)} areas`, hex(c), fillRings(fill, w, h, 1500 * k * k));
     if (areas.count) layers.unshift({ ...areas, area: true });
   }
-  // Lines in a second ink colour (a red grid, tram routes) pass through as
-  // their own layers, one per colour.
-  // The reference grid printed over the map: dead straight lines from edge
-  // to edge, found by two methods that must agree, and drawn exactly
-  // straight. The rest of the coloured ink (tram routes) is traced without it.
-  const grid = gridLines(colourInk, w, h, k, frame.neat);
-  // Shown where the map shows it: not across the title and legend boxes.
-  const gridShown = grid.flatMap((l) => splitOff(l, crop, w, h, 20 * k));
-  if (gridShown.length) {
-    const c = inkColourAlong(grid[0], rgba, colourInk, w, h);
-    layers.push(layer('Grid lines', hex(c), gridShown));
-  }
-  const gridBand = dilate(rasterise(grid, w, h), w, h, r(4));
-  // Tram routes: the coloured ink left once the grid is out, with the
-  // route-number badges and arrows closed into the line so one joined line
-  // runs through them, across the gaps where a street crosses.
-  const routes = routeLines(colourInk, A, B, gridBand, crop, deepWater, w, h, k);
-  if (routes.length) {
-    const c = inkColourAlong(routes[0], rgba, colourInk, w, h);
-    layers.push(layer('Tram routes', hex(c), routes));
-  }
+  if (gridShown.length) layers.push(layer('Grid lines', hex(inkColourAlong(grid[0], rgba, colourInk, w, h)), gridShown));
+  if (routes.length) layers.push(layer('Tram routes', hex(inkColourAlong(routes[0], rgba, colourInk, w, h)), routes));
   layers.push(layer('Railways', main?.colour || '#2b2f3a', rails.concat(closeGaps(rails, 30 * k))));
   layers.push(layer('Dashed lines', main?.colour || '#2b2f3a', dashed));
   layers.push(layer('Street centres', '#b07a2a', centres, false));
@@ -862,6 +862,102 @@ export function gridLines(colour, w, h, k, neat) {
   return out;
 }
 
+// The street edges a tram route hides. A route runs down the middle of its
+// street, so the street's edges are the route moved about half a street
+// width to either side. routeSides splits each route into straight
+// stretches and finds, for each side, how far out the edge is: where the
+// edge's ink and the lines found line up best, within reason of half a
+// street width ("sure" when they line up along a good part of it).
+function routeSides(routes, strong, known, W, w, h, k) {
+  const strongNear = dilate(strong, w, h, 1), knownNear = dilate(rasterise(known, w, h), w, h, 2), step = 2;
+  const stretches = [];
+  for (const route of routes) {
+    const runs = simplify(route, 2 * k);
+    for (let s = 1; s < runs.length; s++) {
+      const a = runs[s - 1], b = runs[s], len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      if (len < 15 * k) continue;
+      const ux = (b[0] - a[0]) / len, uy = (b[1] - a[1]) / len, ts = [];
+      for (let t = 0; t <= len; t += step) ts.push(t);
+      const st = { a, ux, uy, ts, sides: [] };
+      for (const sg of [1, -1]) {
+        const at = (t, d) => idx(a[0] + ux * t - sg * uy * d, a[1] + uy * t + sg * ux * d, w, h);
+        const count = (m, d) => ts.reduce((c, t) => c + m[at(t, d)], 0);
+        let d = W / 2, best = 0;
+        for (let dd = Math.max(2, 0.3 * W); dd <= 0.75 * W; dd += 0.5) { const c = count(strongNear, dd) + count(knownNear, dd); if (c > best) { best = c; d = dd; } }
+        const sure = best >= 0.4 * ts.length;
+        st.sides.push({ sg, at, d: sure ? d : W / 2, sure, lined: count(knownNear, d) >= 0.2 * ts.length ? 1 : 0 });
+      }
+      stretches.push(st);
+    }
+  }
+  return stretches;
+}
+
+// Where each sure side's edge would run, the whole stretch long.
+function sideLines(stretches) {
+  const out = [];
+  for (const { a, ux, uy, ts, sides } of stretches) for (const { sg, d, sure } of sides) {
+    if (!sure) continue;
+    const t1 = ts[ts.length - 1];
+    out.push([[a[0] - sg * uy * d, a[1] + sg * ux * d], [a[0] + ux * t1 - sg * uy * d, a[1] + uy * t1 + sg * ux * d]]);
+  }
+  return out;
+}
+
+// Three judges then look along each side of each stretch: the edge's ink
+// peeking out past the route, a block on the far side, and lines already
+// found lying on that offset. A stretch is drawn where two agree and no line
+// runs yet, as a straight run. Lines found in the street between a
+// stretch's two edges (scraps of the route's badges and arrows) are taken
+// out first. Returns { edges, lines, junk }.
+function routeEdges({ stretches, strong, blocks, edges, known, w, h, k }) {
+  const strongNear = dilate(strong, w, h, 1), r2 = Math.max(2, Math.round(2 * k));
+  let knownMask = rasterise(known, w, h);
+  // Scraps in the street: found lines lying between a stretch's two edges
+  // (pieces of the route's badges and arrows, or lettering).
+  const band = new Uint8Array(w * h);
+  for (const { a, ux, uy, ts, sides } of stretches) {
+    if (!sides.every((sd) => sd.sure)) continue;
+    const t1 = ts[ts.length - 1];
+    for (let o = -(sides[1].d - 1.5); o <= sides[0].d - 1.5; o += 0.5) drawLine(band, [[a[0] - uy * o, a[1] + ux * o], [a[0] + ux * t1 - uy * o, a[1] + uy * t1 + ux * o]], w, h);
+  }
+  const piece = 4 * k, kept = [], junk = [];
+  for (const line of edges) {
+    const total = lineLength(line), pieces = Math.max(1, Math.round(total / piece));
+    let start = 0, bad = null;
+    for (let p = 0; p <= pieces; p++) {
+      let isJunk = false;
+      if (p < pieces) {
+        const pts = samplePath(line, (p * total) / pieces, ((p + 1) * total) / pieces, 1);
+        isJunk = pts.reduce((c, [x, y]) => c + band[idx(x, y, w, h)], 0) >= 0.8 * pts.length;
+      }
+      if (p === pieces || isJunk !== bad) {
+        if (bad !== null && p > start) (bad ? junk : kept).push(subPath(line, (start * total) / pieces, (p * total) / pieces));
+        start = p; bad = isJunk;
+      }
+    }
+  }
+  if (junk.length) knownMask = rasterise(kept.concat(known.filter((l) => !edges.includes(l))), w, h);
+  const knownHere = dilate(knownMask, w, h, r2);
+  // Each side: the edge's ink peeking out past the route, a block on the far
+  // side, and found lines on the same offset. Drawn where two agree.
+  const lines = [];
+  for (const { a, ux, uy, ts, sides } of stretches) for (const { sg, at, d, lined } of sides) {
+    const vote = ts.map((t) => !knownHere[at(t, d)] && strongNear[at(t, d)] + (blocks[at(t, d + 4 * k)] && blocks[at(t, d + 8 * k)]) + lined >= 2);
+    for (let i = 0; i < vote.length; ) {
+      if (!vote[i]) { i++; continue; }
+      let j = i;
+      while (j + 1 < vote.length && (vote[j + 1] || (j + 2 < vote.length && vote[j + 2]))) j++;
+      if (ts[j] - ts[i] >= 6 * k) {
+        const p = (t) => [a[0] + ux * t - sg * uy * d, a[1] + uy * t + sg * ux * d];
+        lines.push([p(ts[i]), p(ts[j])]);
+      }
+      i = j + 1;
+    }
+  }
+  return { edges: kept.filter((l) => lineLength(l) > 1), lines, junk };
+}
+
 // Coloured lines other than the grid, traced as joined lines.
 function routeLines(colour, A, B, gridBand, crop, water, w, h, k) {
   const n = w * h;
@@ -1317,7 +1413,7 @@ function scalePath(d, s) {
 // moreBlocks). Also takes out paper fold creases, which read as long faint
 // straight lines. avoid: where no loose end should be carried on (railways,
 // dashed lines). Returns { edges, inferred, creases }.
-function fillIn({ inkImg, ink, colourInk, fill, crop, blockMask, avoid, edges, shore, w, h, k }) {
+function fillIn({ inkImg, ink, colourInk, gridBand, hints, fill, crop, blockMask, avoid, edges, shore, w, h, k }) {
   const n = w * h;
   const strong = strongInk(inkImg, ink, w, h);
   const strongNear = dilate(strong, w, h, 2);
@@ -1337,7 +1433,20 @@ function fillIn({ inkImg, ink, colourInk, fill, crop, blockMask, avoid, edges, s
   const cropNear = dilate(crop, w, h, Math.round(15 * k));
   for (let i = 0; i < n; i++) if (cropNear[i]) skip[i] = 1;
   const blocks = moreBlocks(strong, colourInk, skip, blockMask, kept.concat(shore, loose), w, h, k);
-  return { edges: kept, inferred: loose.concat(blocks), creases };
+  let allBlocks = blocks.mask ? blockMask.map((v, i) => v | blocks.mask[i]) : blockMask, more = blocks.lines;
+  // The grid sometimes runs along a street, standing in for a hidden edge,
+  // and sometimes across a block, cutting it into slivers too thin to pass
+  // for blocks. A second look with the grid not counting as a wall finds
+  // those.
+  // Where a tram route hides a block's edge, the edge found beside the
+  // route stands in for it.
+  if (gridBand) {
+    const walls = colourInk.map((v, i) => v && !gridBand[i]);
+    const again = moreBlocks(strong, walls, skip, allBlocks, kept.concat(shore, loose, more), w, h, k, hints && rasterise(hints, w, h));
+    if (again.mask) allBlocks = allBlocks.map((v, i) => v | again.mask[i]);
+    more = more.concat(again.lines);
+  }
+  return { edges: kept, inferred: loose.concat(more), creases, strong, blocks: allBlocks };
 }
 
 // Printed ink is much darker than a crease's shadow or a stain: halfway
@@ -1372,12 +1481,12 @@ function splitFaint(l, strongNear, minLen, w, h, kept, faint) {
 // once coloured ink (a tram route printed over a block's edge) and the lines
 // already found count as edges too, with faint creases not counting. Returns
 // the new blocks' outlines where no line runs yet.
-function moreBlocks(strong, colourInk, skip, blockMask, known, w, h, k) {
+function moreBlocks(strong, colourInk, skip, blockMask, known, w, h, k, extra = null) {
   const n = w * h;
   const r = (px) => Math.max(1, Math.round(px * k));
   const knownMask = rasterise(known, w, h);
   let wall = new Uint8Array(n);
-  for (let i = 0; i < n; i++) wall[i] = strong[i] || colourInk[i] || knownMask[i] ? 1 : 0;
+  for (let i = 0; i < n; i++) wall[i] = strong[i] || colourInk[i] || knownMask[i] || extra?.[i] ? 1 : 0;
   wall = dilate(wall, w, h, 1);
   const paper = new Uint8Array(n);
   for (let i = 0; i < n; i++) paper[i] = !wall[i] ? 1 : 0;
@@ -1394,7 +1503,7 @@ function moreBlocks(strong, colourInk, skip, blockMask, known, w, h, k) {
     if (a < 150 * k * k || a > 0.01 * n || maxw[l] < 6 * k || !clear[l] || had[l] > 0.8 * a || a / (bw * bh) < 0.4) continue;
     keep[l] = 1; any++;
   }
-  if (!any) return [];
+  if (!any) return { lines: [], mask: null };
   const found = new Uint8Array(n);
   for (let i = 0; i < n; i++) if (keep[pc.label[i]]) found[i] = 1;
   const mask = open(dilate(found, w, h, 2), w, h, r(2));
@@ -1417,7 +1526,7 @@ function moreBlocks(strong, colourInk, skip, blockMask, known, w, h, k) {
   // Its edge must be printed nearly all the way round: an open area fenced
   // by dotted paths or hatching isn't a block.
   const printed = new Uint8Array(n);
-  for (let i = 0; i < n; i++) printed[i] = strong[i] || colourInk[i] ? 1 : 0;
+  for (let i = 0; i < n; i++) printed[i] = strong[i] || colourInk[i] || extra?.[i] ? 1 : 0;
   const printedNear = dilate(printed, w, h, r(2) + 1);
   for (const line of shapes) {
     if (meanAlong(line, near, w, h) > 0.95 || meanAlong(line, printedNear, w, h) < 0.9) continue;
@@ -1434,7 +1543,7 @@ function moreBlocks(strong, colourInk, skip, blockMask, known, w, h, k) {
       if (!fresh && start >= 0) { out.push(subPath(line, (start * total) / pieces, (p * total) / pieces)); start = -1; }
     }
   }
-  return out;
+  return { lines: out, mask };
 }
 
 // ---------- evening out ----------
@@ -1474,7 +1583,7 @@ function evenOut(groups, spaceDepth, centres, w, h, k) {
     });
     if (kept.length === before) break;
   }
-  return { groups: groups.map((_, g) => kept.filter((l) => l.g === g)), dropped };
+  return { groups: groups.map((_, g) => kept.filter((l) => l.g === g)), dropped, width: W };
 }
 
 // Joins lines whose ends meet where no third line ends too.
