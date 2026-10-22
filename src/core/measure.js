@@ -20,8 +20,12 @@
 export function measureYardsticks(gray, paperOf, ink, paper, w, h) {
   const lineWeight = measureLineWeight(gray, paperOf, ink, w, h);
   const street = lineWeight.value ? measureStreetWidth(paper, w, h, lineWeight.value) : { value: 0, share: 0 };
+  // The same on the pull's own ink mask, soft edges and all: how thick a
+  // line looks to the steps that work on that mask.
+  const inkWidth = peak(ink, chords(ink, w, h), 0.25, 0.75, 40, () => 1);
   return {
     lineWeight: round(lineWeight.value),
+    inkWidth: round(inkWidth.value),
     streetWidth: round(street.value),
     // How much of what was counted sits in the peak: a clear single line
     // weight is what the pull sizes itself by.

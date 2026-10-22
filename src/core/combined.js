@@ -117,23 +117,47 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
   const crop = boxesOfPrint(ink, pc, w, h);
   const blocks = new Uint8Array(n), streets = new Uint8Array(n);
   const kind = new Uint8Array(pc.count + 1); // 1 block, 2 street
+  const symbolNear = dilate(colourInk, w, h, 2), hulls = [];
+  if (dbg) dbg.narrow = [];
   for (let l = 1; l <= pc.count; l++) {
     const a = pc.area[l], bw = pc.x1[l] - pc.x0[l] + 1, bh = pc.y1[l] - pc.y0[l] + 1;
     if (a < 40 * k * k) continue;
     // A street is a narrow patch (often cut short by its lettering) or the
     // big connected network; a block is wide enough and fairly compact.
-    if (maxw[l] < 6 * k || a > 0.02 * n || a / (bw * bh) < 0.3) kind[l] = 2;
-    else if (a >= 150 * k * k) kind[l] = 1;
+    if (a > 0.02 * n) { kind[l] = 2; continue; }
+    if (maxw[l] >= 6 * k && a / (bw * bh) >= 0.3) { if (a >= 150 * k * k) kind[l] = 1; continue; }
+    // Narrower than a usual block, or loose in the box round it: a street
+    // cut off by its lettering, or a block no wider than the streets round
+    // it, or a long block turned at an angle. A block fills the rectangle
+    // round it (turned its own way); a street's cut-off ends follow its
+    // letters, so it doesn't. Not a sliver between two lines printed close
+    // together (a double frame, a railway band), though.
+    kind[l] = 2;
+    if (a >= 150 * k * k) {
+      const j = blockLike(pc, l, w, symbolNear);
+      // It's drawn as its hull, so lettering or a symbol biting into an edge
+      // doesn't put a notch in its outline.
+      if (j.fillRect >= 0.8 && j.wid >= 2.5 * yard.inkWidth && j.len <= 12 * j.wid) { kind[l] = 1; hulls.push(j.hull()); }
+      if (dbg) dbg.narrow.push({ l, a, maxw: maxw[l], block: kind[l] === 1, ...j });
+    }
   }
   // The map's border and the framed boxes on it (the title, legends) are
   // found from their long straight sides; nothing in them is map.
   const frame = framesAndBoxes(ink, w, h, k, (i) => kind[pc.label[i]] === 1);
   for (let i = 0; i < n; i++) if (frame.crop[i]) crop[i] = 1;
+  if (dbg) Object.assign(dbg, { paperLabel: pc.label, kind, crop: crop.slice() });
   if (dbg) dbg.boxes = frame.boxes.map(([x0, y0, x1, y1]) => [[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]]);
   for (let i = 0; i < n; i++) {
     if (crop[i]) continue;
     const t = kind[pc.label[i]];
     if (t === 1) blocks[i] = 1; else if (t === 2) streets[i] = 1;
+  }
+  for (const ring of hulls) {
+    const xs = ring.map((p) => p[0]), ys = ring.map((p) => p[1]);
+    const x0 = Math.floor(Math.min(...xs)), y0 = Math.floor(Math.min(...ys)), bw = Math.ceil(Math.max(...xs)) - x0 + 1, bh = Math.ceil(Math.max(...ys)) - y0 + 1;
+    // Pixel centres are on the hull's corners; half a pixel round them is in.
+    const m = fillPolygon(ring.map(([x, y]) => [x + 0.5 + Math.sign(x - (x0 + bw / 2)) * 0.5, y + 0.5 + Math.sign(y - (y0 + bh / 2)) * 0.5]), x0, y0, bw, bh);
+    for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) { const i = (y + y0) * w + x + x0; if (m[y * bw + x] && !crop[i]) blocks[i] = 1; }
   }
   // Grow each block back over half its outline, and smooth off the bumps.
   let blockMask = open(dilate(blocks, w, h, 1), w, h, r(2));
@@ -597,6 +621,57 @@ function boxesOfPrint(ink, pc, w, h) {
 // With minEdge, only straight-sided outlines: every edge at least that long
 // (a bump of lettering on a side is cut off) and still the block's shape, or
 // none at all; never a wiggly one.
+// How fully a patch of paper fills the rectangle round it (turned to the
+// patch's own direction), and that rectangle's length and width.
+function blockLike(pc, l, w, colourNear) {
+  const { label } = pc, X0 = pc.x0[l], X1 = pc.x1[l], Y0 = pc.y0[l], Y1 = pc.y1[l];
+  let sx = 0, sy = 0, m = 0;
+  for (let y = Y0; y <= Y1; y++) for (let x = X0; x <= X1; x++) if (label[y * w + x] === l) { sx += x; sy += y; m++; }
+  const cx = sx / m, cy = sy / m;
+  let sxx = 0, syy = 0, sxy = 0;
+  for (let y = Y0; y <= Y1; y++) for (let x = X0; x <= X1; x++) if (label[y * w + x] === l) { sxx += (x - cx) ** 2; syy += (y - cy) ** 2; sxy += (x - cx) * (y - cy); }
+  const th = 0.5 * Math.atan2(2 * sxy, sxx - syy), ux = Math.cos(th), uy = Math.sin(th);
+  let a0 = Infinity, a1 = -Infinity, b0 = Infinity, b1 = -Infinity;
+  for (let y = Y0; y <= Y1; y++) for (let x = X0; x <= X1; x++) if (label[y * w + x] === l) {
+    const a = (x - cx) * ux + (y - cy) * uy, b = -(x - cx) * uy + (y - cy) * ux;
+    if (a < a0) a0 = a; if (a > a1) a1 = a; if (b < b0) b0 = b; if (b > b1) b1 = b;
+  }
+  // A symbol or a number printed inside the block is a hole in the patch,
+  // not a bite out of it.
+  const bw = X1 - X0 + 1, bh = Y1 - Y0 + 1, out = new Uint8Array(bw * bh), stack = [];
+  const push = (x, y) => { const q = (y - Y0) * bw + x - X0; if (!out[q] && label[y * w + x] !== l) { out[q] = 1; stack.push(x, y); } };
+  for (let x = X0; x <= X1; x++) { push(x, Y0); push(x, Y1); }
+  for (let y = Y0; y <= Y1; y++) { push(X0, y); push(X1, y); }
+  while (stack.length) {
+    const y = stack.pop(), x = stack.pop();
+    if (x > X0) push(x - 1, y); if (x < X1) push(x + 1, y); if (y > Y0) push(x, y - 1); if (y < Y1) push(x, y + 1);
+  }
+  // So is a coloured symbol printed over its edge (with the soft rim round
+  // it, which reads as ink).
+  let filled = 0;
+  const pts = [];
+  for (let y = Y0; y <= Y1; y++) for (let x = X0; x <= X1; x++) {
+    const q = (y - Y0) * bw + x - X0;
+    if (!out[q]) { filled++; pts.push([x, y]); continue; }
+    if (!colourNear?.[y * w + x]) continue;
+    const a = (x - cx) * ux + (y - cy) * uy, b = -(x - cx) * uy + (y - cy) * ux;
+    if (a >= a0 && a <= a1 && b >= b0 && b <= b1) { filled++; pts.push([x, y]); }
+  }
+  return { fillRect: filled / ((a1 - a0 + 1) * (b1 - b0 + 1)), len: a1 - a0 + 1, wid: b1 - b0 + 1, cx, cy, hull: () => convexHull(pts) };
+}
+
+// The convex hull of points, as a closed ring (Andrew's monotone chain).
+function convexHull(pts) {
+  const p = pts.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const lower = [], upper = [];
+  for (const q of p) { while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], q) <= 0) lower.pop(); lower.push(q); }
+  for (let i = p.length - 1; i >= 0; i--) { const q = p[i]; while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], q) <= 0) upper.pop(); upper.push(q); }
+  const ring = lower.slice(0, -1).concat(upper.slice(0, -1));
+  ring.push(ring[0]);
+  return ring;
+}
+
 function blockOutlines(mask, w, h, minArea, minEdge = 0) {
   const c = components(mask, w, h, true);
   const outs = [];
