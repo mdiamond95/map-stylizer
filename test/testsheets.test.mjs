@@ -9,8 +9,8 @@ import { extractCombined } from '../src/core/combined.js';
 import { SHEETS } from '../tools/sheetlist.mjs';
 
 const FLOORS = {
-  A: { block: 0.85, narrow: 0.68, dashed: 0.68, rail: 0.93, shore: 0.93, grid: 0.95 },
-  D: { block: 0.93, narrow: 0.95, dashed: 0.58, rail: 0.93, shore: 0.95 }
+  A: { block: 0.85, narrow: 0.68, dashed: 0.68, path: 0.85, rail: 0.93, shore: 0.93, grid: 0.95 },
+  D: { block: 0.93, narrow: 0.95, dashed: 0.55, path: 0.25, rail: 0.93, shore: 0.95 }
 };
 for (const [name, floor] of Object.entries(FLOORS)) {
   const sheet = makeTestSheet(SHEETS[name]);
@@ -23,4 +23,4 @@ for (const [name, floor] of Object.entries(FLOORS)) {
   assert.ok(score.extra <= 0.05, `sheet ${name}: stray lines ${score.extra}`);
   assert.ok(score.inEmpty <= 50, `sheet ${name}: ${score.inEmpty} px of lines in the title box`);
 }
-console.log('test sheets: blocks, narrow blocks, dashes, railways, shore and grid found; line weight measured');
+console.log('test sheets: blocks, narrow blocks, dashes, paths, railways, shore and grid found; line weight measured');

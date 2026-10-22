@@ -358,6 +358,7 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
   if (routes.length) layers.push(layer('Tram routes', hex(inkColourAlong(routes[0], rgba, colourInk, w, h)), routes));
   layers.push(layer('Railways', main?.colour || '#2b2f3a', rails.concat(closeGaps(rails, 30 * k))));
   layers.push(layer('Dashed lines', main?.colour || '#2b2f3a', dashed));
+  layers.push(layer('Paths through woods', main?.colour || '#2b2f3a', lightPaths(ink, fill, crop, rails, w, h, yard.lineWeight || 1.6 * k)));
   layers.push(layer('Street centres', '#b07a2a', centres, false));
   layers.push(layer('Unsure lines', '#e07b00', unsureLeft, false));
   if (dbg) Object.assign(dbg, { shapes, plain: plainLines, masked: maskedLines, fillEdges, gaps, inferred: filled.inferred });
@@ -1614,6 +1615,74 @@ function dashedLines(ink, skip, w, h, k, inMargin) {
     if (straight >= 4 || (straight >= 3 && bent)) out.push(chain);
   }
   return out;
+}
+
+// Paths through woods: in a park drawn as dense hatching, the paths are
+// the paper left showing, as lines a few line weights wide winding through
+// the ink. Woods are where ink covers most of the ground round about; the
+// paper in them, less the specks between strokes, is thinned to its middle,
+// and the long runs kept. lw: the map's line weight.
+function lightPaths(ink, fill, crop, rails, w, h, lw) {
+  const n = w * h, R = Math.max(2, Math.round(6 * lw));
+  // Ink cover round each pixel, from a summed-area table.
+  const S = new Float64Array((w + 1) * (h + 1));
+  for (let y = 0; y < h; y++) {
+    let row = 0;
+    for (let x = 0; x < w; x++) { row += ink[y * w + x]; S[(y + 1) * (w + 1) + x + 1] = S[y * (w + 1) + x + 1] + row; }
+  }
+  const cover = (x, y, r) => {
+    x = Math.round(x); y = Math.round(y);
+    const x0 = Math.max(0, x - r), x1 = Math.min(w, x + r + 1), y0 = Math.max(0, y - r), y1 = Math.min(h, y + r + 1);
+    if (x1 <= x0 || y1 <= y0) return 0;
+    return (S[y1 * (w + 1) + x1] - S[y0 * (w + 1) + x1] - S[y1 * (w + 1) + x0] + S[y0 * (w + 1) + x0]) / ((x1 - x0) * (y1 - y0));
+  };
+  const woods = new Uint8Array(n);
+  let any = 0;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (cover(x, y, R) >= 0.45) { woods[y * w + x] = 1; any++; }
+  if (any < 400 * lw * lw) return [];
+  const near = dilate(woods, w, h, Math.round(4 * lw));
+  const paper = new Uint8Array(n);
+  for (let i = 0; i < n; i++) paper[i] = near[i] && !ink[i] && !fill[i] && !crop[i] ? 1 : 0;
+  // Less the specks and slivers between strokes: what's left after taking
+  // a pixel off every edge (across and down), grown back.
+  const core = new Uint8Array(n), open = new Uint8Array(n);
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) { const i = y * w + x; core[i] = paper[i] && paper[i - 1] && paper[i + 1] && paper[i - w] && paper[i + w] ? 1 : 0; }
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) { const i = y * w + x; open[i] = paper[i] && (core[i] || core[i - 1] || core[i + 1] || core[i - w] || core[i + w]) ? 1 : 0; }
+  thin(open, w, h);
+  // The paths, less short spurs, joined across the odd stroke that crosses
+  // one; then only networks of real length, so gaps between strokes and the
+  // letters of a name in the woods drop out.
+  const lines = prune(traceSkeleton(open, w, h), 6 * lw, 10 * lw).map((l) => keepFarthest(l, 1)).filter((l) => lineLength(l) >= 3 * lw);
+  const all = lines.concat(closeGaps(lines, 6 * lw));
+  const key = (p) => `${Math.round(p[0] / 2)},${Math.round(p[1] / 2)}`;
+  const parent = new Map();
+  const find = (q) => { while (parent.get(q) !== q) { parent.set(q, parent.get(parent.get(q))); q = parent.get(q); } return q; };
+  const join = (p, q) => { for (const r of [p, q]) if (!parent.has(r)) parent.set(r, r); parent.set(find(p), find(q)); };
+  // Ends a pixel or two apart are one joint.
+  const at = new Map();
+  for (const l of all) for (const p of [l[0], l[l.length - 1]]) {
+    const x = Math.round(p[0] / 2), y = Math.round(p[1] / 2);
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const q = at.get(`${x + dx},${y + dy}`); if (q) join(key(p), q); }
+    at.set(`${x},${y}`, key(p));
+  }
+  for (const l of all) join(key(l[0]), key(l[l.length - 1]));
+  const total = new Map();
+  for (const l of all) { const r = find(key(l[0])); total.set(r, (total.get(r) || 0) + lineLength(l)); }
+  // A path runs through the woods, with woods either side of it, not along
+  // their edge or between the lines of a railway.
+  const railNear = dilate(rasterise(rails, w, h), w, h, Math.round(5 * lw));
+  const r = Math.max(1, Math.round(2 * lw)), out = 4 * lw;
+  const wooded = (l) => {
+    const pts = samplePath(l, 0, lineLength(l), 2);
+    let both = 0;
+    pts.forEach(([x, y], i) => {
+      const [ax, ay] = pts[Math.max(0, i - 2)], [bx, by] = pts[Math.min(pts.length - 1, i + 2)], L = Math.hypot(bx - ax, by - ay) || 1;
+      const nx = -(by - ay) / L, ny = (bx - ax) / L;
+      if (cover(x + nx * out, y + ny * out, r) >= 0.35 && cover(x - nx * out, y - ny * out, r) >= 0.35) both++;
+    });
+    return both >= 0.6 * pts.length;
+  };
+  return all.filter((l) => total.get(find(key(l[0]))) >= 50 * lw && meanAlong(l, railNear, w, h) < 0.3 && wooded(l)).map((l) => keepFarthest(smoothLine(l, 1.5 * lw), 0.6));
 }
 
 // ---------- lines ----------

@@ -10,7 +10,7 @@
 // either way.
 //
 // makeTestSheet(options) -> { rgba, w, h, truth: { lines, zones }, yard }
-//   lines: [{ kind, pts, narrow? }], kind one of block, tree, dashed, rail,
+//   lines: [{ kind, pts, narrow? }], kind one of block, tree, dashed, path, rail,
 //          shore, grid, frame
 //   zones: [{ kind: 'lettering' | 'empty', pts }] areas where no line belongs
 //   yard:  the line weight and street width it was drawn with, in pixels
@@ -151,6 +151,26 @@ export function makeTestSheet(options = {}) {
   truth('dashed', path);
   text(ink, 'PARK', P(400, 640), 14 * s, 0, LW * 0.8, 0.25);
   zones.push({ kind: 'lettering', pts: [P(398, 624), P(448, 624), P(448, 642), P(398, 642)] });
+
+  // Woods drawn as close hatching, with paths left as paper winding
+  // through them.
+  const trails = [[[358, 38], [420, 68], [480, 58], [552, 94]], [[420, 68], [446, 106]]];
+  const clear = 1.5 * o.lineWeight + o.lineWeight / 2;
+  const nearTrail = (x, y) => trails.some((t) => t.some((q, i) => {
+    if (!i) return false;
+    const [ax, ay] = t[i - 1], [bx, by] = q, dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy;
+    const u = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / L2));
+    return Math.hypot(x - ax - u * dx, y - ay - u * dy) < clear;
+  }));
+  const stroke = 0.6 * o.streetWidth;
+  for (let y = 26; y <= 106; y += 1.5 * o.lineWeight) {
+    for (let x = 352 + rnd() * stroke; x + stroke <= 558; x += stroke + 0.15 * o.streetWidth) {
+      const bend = (rnd() - 0.5) * o.lineWeight, a = [x, y], m = [x + stroke / 2, y + bend], b = [x + stroke, y + (rnd() - 0.5) * o.lineWeight * 0.5];
+      if ([a, m, b].some(([px, py]) => nearTrail(px, py))) continue;
+      ink.stroke([a, m, b].map((q) => P(...q)), LW);
+    }
+  }
+  for (const t of trails) truth('path', t.map((q) => P(...q)));
 
   // Railways (a heavy hatched band, and a line with cross ticks), a few
   // blocks, and the harbour with a pier.

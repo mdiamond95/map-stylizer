@@ -4,7 +4,7 @@
 // traced as wiggles).
 //
 // scoreSheet(layers, truth, { streetWidth }) -> {
-//   found: { block, narrow, tree, dashed, dashedAnywhere, rail, shore, grid }  fraction of each kind's length found
+//   found: { block, narrow, tree, dashed, dashedAnywhere, path, rail, shore, grid }  fraction of each kind's length found
 //   extra: length of shown lines not near any real line, as a fraction of the real lines' length
 //   onLettering: length of shown lines over street names and symbols, in pixels
 // }
@@ -15,6 +15,7 @@ const HOMES = {
   tree: /^(Street and block edges|Filled-in lines)$/,
   dashed: /^Dashed lines$/,
   dashedAnywhere: /^(Street and block edges|Filled-in lines|Dashed lines)$/,
+  path: /^Paths through woods$/,
   rail: /^Railways$/,
   shore: /^(Water edge|Street and block edges)$/,
   grid: /^Grid lines$/
