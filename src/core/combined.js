@@ -458,8 +458,9 @@ function boxesOfPrint(ink, pc, w, h) {
 // ---------- shapes ----------
 
 // Outline of each block, simplified, then squared up where that keeps the shape.
-// With minEdge, only outlines drawn with straight edges at least that long on
-// average (a block, not the ragged edge of hillside hatching).
+// With minEdge, only straight-sided outlines: every edge at least that long
+// (a bump of lettering on a side is cut off) and still the block's shape, or
+// none at all; never a wiggly one.
 function blockOutlines(mask, w, h, minArea, minEdge = 0) {
   const c = components(mask, w, h, true);
   const outs = [];
@@ -469,11 +470,53 @@ function blockOutlines(mask, w, h, minArea, minEdge = 0) {
     if (ring.length < 8) continue;
     const coarse = simplify(ring.concat([ring[0]]), 1.5);
     const rough = simplify(ring.concat([ring[0]]), 2.5);
-    if (minEdge && lineLength(rough) / (rough.length - 1) < minEdge) continue;
+    if (minEdge) {
+      const sides = dropShortEdges(simplify(ring.concat([ring[0]]), 3), minEdge);
+      const sq = sides && squareUp(sides);
+      const best = sq && overlap(sq, coarse) > 0.85 ? sq : sides;
+      if (best && overlap(best, coarse) > 0.85 && !hasSpike(best)) outs.push(best);
+      continue;
+    }
     const sq = squareUp(rough);
     outs.push(sq && overlap(sq, coarse) > 0.9 ? sq : coarse);
   }
   return outs;
+}
+
+// A corner sharper than 30 degrees on a closed outline: a spike, not a block.
+function hasSpike(p) {
+  const m = p.length - 1;
+  for (let i = 0; i < m; i++) {
+    const a = p[(i - 1 + m) % m], b = p[i], c = p[(i + 1) % m];
+    const u = [a[0] - b[0], a[1] - b[1]], v = [c[0] - b[0], c[1] - b[1]];
+    const cos = (u[0] * v[0] + u[1] * v[1]) / (Math.hypot(...u) * Math.hypot(...v) || 1);
+    if (cos > Math.cos(Math.PI / 6)) return true;
+  }
+  return false;
+}
+
+// A closed outline with every edge at least minEdge long: the shortest edge
+// goes, its neighbours carried on to meet, until none is too short. Null
+// if fewer than three edges are left.
+function dropShortEdges(p, minEdge) {
+  let pts = p.slice(0, -1);
+  const len = (i) => { const a = pts[i], b = pts[(i + 1) % pts.length]; return Math.hypot(b[0] - a[0], b[1] - a[1]); };
+  while (pts.length > 3) {
+    let s = 0;
+    for (let i = 1; i < pts.length; i++) if (len(i) < len(s)) s = i;
+    if (len(s) >= minEdge) break;
+    const m = pts.length, a = pts[(s - 1 + m) % m], b = pts[s], c = pts[(s + 1) % m], d = pts[(s + 2) % m];
+    // Where the edges before and after meet, if near; else the short edge's middle.
+    const den = (b[0] - a[0]) * (d[1] - c[1]) - (b[1] - a[1]) * (d[0] - c[0]);
+    let q = [(b[0] + c[0]) / 2, (b[1] + c[1]) / 2];
+    if (Math.abs(den) > 1e-6) {
+      const t = ((c[0] - a[0]) * (d[1] - c[1]) - (c[1] - a[1]) * (d[0] - c[0])) / den;
+      const x = [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])];
+      if (Math.hypot(x[0] - q[0], x[1] - q[1]) < 2 * minEdge) q = x;
+    }
+    pts = s === m - 1 ? [q, ...pts.slice(1, s)] : [...pts.slice(0, s), q, ...pts.slice(s + 2)];
+  }
+  return pts.length >= 3 ? pts.concat([pts[0]]) : null;
 }
 
 function firstX(label, l, w, y, x0, x1) { for (let x = x0; x <= x1; x++) if (label[y * w + x] === l) return x; return x0; }

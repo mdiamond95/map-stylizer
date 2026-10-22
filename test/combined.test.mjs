@@ -77,6 +77,8 @@ assert.ok(edges.length > drawn * 0.9 && edges.length < drawn * 1.15, `edge lengt
 // No line runs through the lettering, away from the block edge it sits on.
 const near = (list, [cx, cy]) => list.some(([x, y]) => Math.hypot(x - cx, y - cy) < 4);
 assert.ok(filledIn && near(pts(filledIn), [routed[0], routed[1]]) && near(pts(filledIn), [routed[0], routed[3]]), 'edge under the tram route filled in');
+// Filled-in lines are straight runs, never wiggly.
+for (const l of (filledIn?.d || '').split('M').filter(Boolean)) assert.ok(l.split('L').length <= 6, `filled-in line has few corners (${l.split('L').length})`);
 const inLetters = e.filter(([x, y]) => letters.some(([x0, y0, x1, y1]) => x > x0 && x < x1 && y > y0 && y < y1)).length;
 assert.equal(inLetters, 0, 'lettering left out');
 // The shoreline runs down the harbour edge, and the piers' outlines into the slip.
