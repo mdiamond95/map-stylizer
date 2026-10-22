@@ -303,19 +303,13 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
     layers.push(layer('Grid lines', hex(c), gridShown));
   }
   const gridBand = dilate(rasterise(grid, w, h), w, h, r(4));
-  const byColour = new Map();
-  for (const l of plain.lines.filter(isColour).flatMap((l) => splitOff(l, gridBand, w, h, 12 * k))) {
-    const c = inkColourAlong(l, rgba, colourInk, w, h);
-    const name = `${colourName(c).replace(/^Dark (.)/, (_, ch) => ch.toUpperCase())} lines`;
-    if (!byColour.has(name)) byColour.set(name, { lines: [], sum: [0, 0, 0], n: 0 });
-    const g = byColour.get(name);
-    g.lines.push(l); g.sum = g.sum.map((v, i) => v + c[i]); g.n++;
-  }
-  // Scraps of colour (a symbol, the edge of the water) aren't worth a layer.
-  const edgeLength = layers[0].length / out;
-  for (const [name, g] of [...byColour].sort((a, b) => b[1].lines.length - a[1].lines.length)) {
-    if (g.lines.reduce((t, l) => t + lineLength(l), 0) < edgeLength * 0.02) continue;
-    layers.push(layer(name, hex(g.sum.map((v) => v / g.n)), g.lines));
+  // Tram routes: the coloured ink left once the grid is out, with the
+  // route-number badges and arrows closed into the line so one joined line
+  // runs through them, across the gaps where a street crosses.
+  const routes = routeLines(colourInk, A, B, gridBand, crop, deepWater, w, h, k);
+  if (routes.length) {
+    const c = inkColourAlong(routes[0], rgba, colourInk, w, h);
+    layers.push(layer('Tram routes', hex(c), routes));
   }
   layers.push(layer('Railways', main?.colour || '#2b2f3a', rails.concat(closeGaps(rails, 30 * k))));
   layers.push(layer('Dashed lines', main?.colour || '#2b2f3a', dashed));
@@ -866,6 +860,34 @@ export function gridLines(colour, w, h, k, neat) {
     }
   }
   return out;
+}
+
+// Coloured lines other than the grid, traced as joined lines.
+function routeLines(colour, A, B, gridBand, crop, water, w, h, k) {
+  const n = w * h;
+  // Routes are printed in the grid's ink; other second-colour ink (specks
+  // of darker water) is a different hue.
+  const ga = [], gb = [];
+  for (let i = 0; i < n; i += 3) if (colour[i] && gridBand[i] && !water[i]) { ga.push(A[i]); gb.push(B[i]); }
+  const med = (v) => v.sort((x, y) => x - y)[v.length >> 1] ?? 0, gA = med(ga), gB = med(gb);
+  let m = new Uint8Array(n);
+  for (let i = 0; i < n; i++) m[i] = colour[i] && !gridBand[i] && !crop[i] && (!ga.length || Math.hypot(A[i] - gA, B[i] - gB) < 30) ? 1 : 0;
+  // Route stroke: what's left once solid symbols (red diamonds, number
+  // badges, both solid once their lettering is closed over) are taken out.
+  const stroke = m.slice(), r2 = Math.max(1, Math.round(2 * k));
+  const solid = dilate(open(close(m, w, h, r2), w, h, Math.max(2, Math.round(4 * k))), w, h, r2);
+  for (let i = 0; i < n; i++) if (solid[i]) stroke[i] = 0;
+  // Close badges (a ring round a number) and a crossing street's gap, then
+  // keep only pieces with a good length of route stroke in them, so a run of
+  // badges stays but a cluster of diamonds goes.
+  m = close(m, w, h, Math.max(2, Math.round(5 * k)));
+  const c = components(m, w, h, true), strokePx = new Float64Array(c.count + 1);
+  for (let i = 0; i < n; i++) if (stroke[i] && c.label[i]) strokePx[c.label[i]]++;
+  for (let i = 0; i < n; i++) { const l = c.label[i]; if (l && (strokePx[l] < 80 * k || Math.max(c.x1[l] - c.x0[l], c.y1[l] - c.y0[l]) < 60 * k)) m[i] = 0; }
+  thin(m, w, h);
+  let lines = prune(traceSkeleton(m, w, h), 12 * k, 30 * k).map((l) => simplify(l, 1.2)).filter((l) => lineLength(l) > 25 * k && meanAlong(l, water, w, h) < 0.5);
+  lines = lines.concat(closeGaps(lines, 30 * k));
+  return joinEnds(lines);
 }
 
 // The parts of a line outside a mask, as lines of at least minLen.
@@ -1463,14 +1485,14 @@ function joinEnds(lines) {
   ls.forEach((l, i) => [0, 1].forEach((s) => { const kk = key(s ? l[l.length - 1] : l[0]); if (!at.has(kk)) at.set(kk, []); at.get(kk).push([i, s]); }));
   const alive = ls.map(() => true), into = ls.map((_, i) => i);
   const find = (i) => { while (into[i] !== i) i = into[i] = into[into[i]]; return i; };
-  for (const ends of at.values()) {
+  for (const [kk, ends] of at) {
     if (ends.length !== 2) continue;
-    let [[i, si], [j, sj]] = ends;
+    let [[i], [j]] = ends;
     i = find(i); j = find(j);
     if (i === j) continue;
     // Each end has to still be an end of the joined line it now belongs to.
-    const a = ls[i], b = ls[j], pa = key(si ? a[a.length - 1] : a[0]), pb = key(sj ? b[b.length - 1] : b[0]);
-    const aEnd = key(a[a.length - 1]) === pa ? 1 : key(a[0]) === pa ? 0 : -1, bEnd = key(b[b.length - 1]) === pb ? 1 : key(b[0]) === pb ? 0 : -1;
+    const a = ls[i], b = ls[j];
+    const aEnd = key(a[a.length - 1]) === kk ? 1 : key(a[0]) === kk ? 0 : -1, bEnd = key(b[b.length - 1]) === kk ? 1 : key(b[0]) === kk ? 0 : -1;
     if (aEnd < 0 || bEnd < 0) continue;
     const left = aEnd ? a : a.slice().reverse(), right = bEnd ? b.slice().reverse() : b;
     ls[i] = left.concat(right.slice(1));

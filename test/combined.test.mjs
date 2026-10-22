@@ -58,11 +58,12 @@ const { layers } = extractCombined(rgba, W, H);
 console.log(`combined (${Date.now() - t} ms):`, layers.map((l) => `${l.name} ${Math.round(l.length)} px${l.show ? '' : ' (hidden)'}`).join(', '));
 const byName = (re) => layers.find((l) => re.test(l.name));
 const pts = (l) => (l?.d.match(/-?[\d.]+,-?[\d.]+/g) || []).map((p) => p.split(',').map(Number));
-const edges = byName(/^Street and block edges$/), filledIn = byName(/^Filled-in lines$/), shore = byName(/^Water edge$/), grid = byName(/Red/);
+const edges = byName(/^Street and block edges$/), filledIn = byName(/^Filled-in lines$/), shore = byName(/^Water edge$/), grid = byName(/^Grid lines$/), routes = byName(/^Tram routes$/);
 const rail = byName(/^Railways$/), dashes = byName(/^Dashed lines$/);
 assert.ok(edges, 'street and block edges layer');
 assert.ok(shore, 'water edge from the harbour colour');
-assert.ok(grid, 'red grid as its own layer');
+assert.ok(grid && pts(grid).every(([, y]) => Math.abs(y - 500.5) < 3), 'red grid as its own straight layer');
+assert.ok(routes && pts(routes).every(([x]) => Math.abs(x - routed[0] - 0.5) < 3) && routes.length > 100, `tram route as one line (${Math.round(routes?.length || 0)} px)`);
 assert.equal(byName(/^Unsure lines$/)?.show ?? false, false, 'unsure lines start hidden');
 
 // Every block's four corners are in the edges layer, square; the block
