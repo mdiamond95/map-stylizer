@@ -209,7 +209,7 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
   const isColour = (l) => meanAlong(l, colourInk, w, h) > 0.5;
   const plainLines = plain.lines.filter((l) => !isColour(l));
   const maskedLines = masked.lines.filter((l) => !isColour(l));
-  const fillEdges = edgeLines(fill, crop, w, h);
+  const fillEdges = edgeLines(fill, crop, w, h, yard.lineWeight || 1.6 * k, ink);
   const margin = 0.03 * Math.max(w, h);
   const inMargin = ([x, y]) => x < margin || y < margin || x > w - margin || y > h - margin;
   const rails = railLines(ink, fill, crop, w, h, k, inMargin);
@@ -870,12 +870,40 @@ function fillRings(fill, w, h, minArea) {
 }
 
 // The edge of each coloured fill, as lines.
-function edgeLines(fill, crop, w, h) {
+// The edge of a coloured area (a shore) is a natural curve, so it is
+// smoothed rather than squared: squaring the pixel steps of a slanting shore
+// leaves a staircase. Where it wobbles along a straight printed shore, it
+// takes the printed line. lw: the map's line weight.
+function edgeLines(fill, crop, w, h, lw, ink) {
   const inner = erode(fill, w, h, 1);
   const edge = new Uint8Array(w * h);
   for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) { const i = y * w + x; if (fill[i] && !inner[i] && !crop[i]) edge[i] = 1; }
   thin(edge, w, h);
-  return prune(traceSkeleton(edge, w, h), 4, 12).map((l) => simplify(l, 1.2)).filter((l) => lineLength(l) > 10);
+  return prune(traceSkeleton(edge, w, h), 4, 12).map((l) => straightenTeeth(keepFarthest(smoothLine(l, 1.5 * lw), 0.6), lw, ink, w, h)).filter((l) => lineLength(l) > 10);
+}
+
+// A line smoothed along its length (a Gaussian of width sigma pixels); the
+// ends of an open line stay where they are.
+function smoothLine(l, sigma) {
+  const pts = [l[0]];
+  for (let i = 1; i < l.length; i++) {
+    const [ax, ay] = l[i - 1], [bx, by] = l[i], m = Math.max(1, Math.round(Math.hypot(bx - ax, by - ay)));
+    for (let t = 1; t <= m; t++) pts.push([ax + (bx - ax) * t / m, ay + (by - ay) * t / m]);
+  }
+  const n = pts.length, R = Math.ceil(3 * sigma);
+  const closed = n > 2 * R && Math.hypot(pts[0][0] - pts[n - 1][0], pts[0][1] - pts[n - 1][1]) < 1.5;
+  const wt = [];
+  for (let d = 0; d <= R; d++) wt.push(Math.exp(-(d * d) / (2 * sigma * sigma)));
+  const m = closed ? n - 1 : n;
+  const out = pts.map((p, i) => {
+    if (!closed && (i === 0 || i === n - 1)) return p;
+    const r = closed ? R : Math.min(R, i, n - 1 - i);
+    let sx = 0, sy = 0, sw = 0;
+    for (let d = -r; d <= r; d++) { const q = pts[closed ? (((i + d) % m) + m) % m : i + d], c = wt[Math.abs(d)]; sx += q[0] * c; sy += q[1] * c; sw += c; }
+    return [sx / sw, sy / sw];
+  });
+  if (closed) out[n - 1] = out[0];
+  return out;
 }
 
 // ---------- reference grid ----------
