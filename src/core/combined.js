@@ -213,6 +213,7 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
   const margin = 0.03 * Math.max(w, h);
   const inMargin = ([x, y]) => x < margin || y < margin || x > w - margin || y > h - margin;
   const rails = railLines(ink, fill, crop, w, h, k, inMargin);
+  for (const l of tickedLines(ink, crop, w, h, k, yard.lineWeight, inMargin)) if (meanAlong(l, dilate(rasterise(rails, w, h), w, h, r(4)), w, h) < 0.5) rails.push(l);
   // Grid lines and boxes of print are no place for dashes.
   const colourNear = dilate(colourInk, w, h, r(2));
   const cropNear = dilate(crop, w, h, r(15));
@@ -1377,6 +1378,87 @@ function turnsPer100(p) {
 // wider than a street line. Keep only the ink that survives shrinking by two
 // pixels, trace what's left, and keep the long smooth runs. Shorelines drawn
 // heavy are left to the water edge, and frames round boxes of print are skipped.
+// Railways drawn as a line with ticks across it, or as a ladder (two rails
+// with rungs between): closed up, they make a band a few line weights wide.
+// A band is a railway when, along both its sides, the ink comes and goes at
+// a steady beat (the ticks) while its middle (the line) or its two edges
+// (the rails) run unbroken. Tree rows and lettering close up into bands too,
+// but don't have both. lw: the map's line weight.
+function tickedLines(ink, crop, w, h, k, lw, inMargin) {
+  const n = w * h, gap = Math.max(2, Math.round(1.6 * lw));
+  const closed = close(ink, w, h, gap);
+  const depth = chamfer(closed, w, h), R = Math.max(1.5, 1.2 * lw);
+  const outside = new Uint8Array(n);
+  for (let i = 0; i < n; i++) outside[i] = depth[i] >= R ? 0 : 1;
+  const back = chamfer(outside, w, h), cropNear = dilate(crop, w, h, Math.round(15 * k));
+  const band = new Uint8Array(n);
+  for (let i = 0; i < n; i++) band[i] = back[i] <= R + 0.5 && !cropNear[i] ? 1 : 0;
+  thin(band, w, h);
+  const at = (m, x, y) => { const xi = Math.round(x), yi = Math.round(y); return xi >= 0 && yi >= 0 && xi < w && yi < h ? m[yi * w + xi] : 0; };
+  const out = [];
+  for (const raw of prune(traceSkeleton(band, w, h), 10 * k, 30 * k)) {
+    const l = keepFarthest(raw, 1.5), len = lineLength(l);
+    if (len < 40 * lw || l.filter(inMargin).length > l.length / 2) continue;
+    // Along the traced pixels, with the way across (from a few pixels
+    // either side, so the steps of a slanting line don't jiggle it).
+    const pts = raw.map(([x, y], i) => {
+      const [ax, ay] = raw[Math.max(0, i - 4)], [bx, by] = raw[Math.min(raw.length - 1, i + 4)], L = Math.hypot(bx - ax, by - ay) || 1;
+      return [x, y, -(by - ay) / L, (bx - ax) / L];
+    });
+    // Across the band at each point: where its middle is (the traced line
+    // can sit off to one side) and half its width.
+    const across = pts.map(([x, y, nx, ny]) => {
+      const walk = (sg) => { let d = 0; while (d < 12 * lw && at(closed, x + sg * nx * (d + 1), y + sg * ny * (d + 1))) d++; return d; };
+      const dl = walk(-1), dr = walk(1);
+      return [(dr - dl) / 2, (dl + dr + 1) / 2];
+    });
+    const halves = across.map((c) => c[1]).sort((a, b) => a - b), H = halves[halves.length >> 1];
+    if (H < 1.2 * lw) continue;
+    // Ink along the band at a fraction f of its half-width out from its
+    // middle (plus `off` pixels), going by the band's width at each point.
+    const along = (f, off = 0) => pts.map(([x, y, nx, ny], i) => { const o = across[i][0] + f * across[i][1] + off; return at(ink, x + nx * o, y + ny * o); });
+    const steady = (p) => {
+      const starts = [];
+      let on = 0;
+      for (let i = 0; i < p.length; i++) { if (p[i]) on++; if (p[i] && (i === 0 || !p[i - 1])) starts.push(i); }
+      const share = on / p.length;
+      // Ticks are thin next to the gaps between them; letters crowd closer.
+      if (starts.length < 6 || share < 0.12 || share > 0.55) return false;
+      const gaps = starts.slice(1).map((v, i) => v - starts[i]).sort((a, b) => a - b);
+      // The beat: the middle gaps, without the odd skipped or doubled tick.
+      const mid = gaps.slice(Math.floor(gaps.length * 0.15), Math.ceil(gaps.length * 0.85));
+      const mean = mid.reduce((a, b) => a + b, 0) / mid.length;
+      const sd = Math.sqrt(mid.reduce((a, b) => a + (b - mean) ** 2, 0) / mid.length);
+      return mean >= 2 && mean <= 12 * lw && sd <= 0.3 * mean && starts.length >= 0.6 * p.length / mean;
+    };
+    const full = (p) => p.reduce((a, b) => a + b, 0) >= 0.85 * p.length;
+    // Ticks across a line: steady beat either side of an unbroken middle.
+    // A ladder: an unbroken rail along each edge, steady rungs between.
+    const ticks = full(along(0)) && steady(along(0.6)) && steady(along(-0.6));
+    const rail = (sg) => [0.4, 0.8, 1.2].some((d) => full(along(sg, -sg * d * lw)));
+    const ladder = rail(1) && rail(-1) && steady(along(0));
+    if (ticks || ladder) out.push(l);
+  }
+  return out;
+}
+
+// Douglas-Peucker on its own: the points that keep the line within tol of
+// the traced pixels, without the corner squaring and smoothing simplify()
+// adds (which pulls a gentle bend off the line).
+function keepFarthest(pts, tol) {
+  const keep = new Uint8Array(pts.length);
+  keep[0] = keep[pts.length - 1] = 1;
+  const stack = [[0, pts.length - 1]];
+  while (stack.length) {
+    const [a, b] = stack.pop();
+    const [ax, ay] = pts[a], [bx, by] = pts[b], len = Math.hypot(bx - ax, by - ay) || 1;
+    let worst = -1, dist = 0;
+    for (let i = a + 1; i < b; i++) { const d = Math.abs((bx - ax) * (ay - pts[i][1]) - (ax - pts[i][0]) * (by - ay)) / len; if (d > dist) { dist = d; worst = i; } }
+    if (dist > tol) { keep[worst] = 1; stack.push([a, worst], [worst, b]); }
+  }
+  return pts.filter((_, i) => keep[i]);
+}
+
 function railLines(ink, fill, crop, w, h, k, inMargin) {
   const n = w * h, R = Math.max(2, Math.round(2 * k));
   const depth = chamfer(ink, w, h);
