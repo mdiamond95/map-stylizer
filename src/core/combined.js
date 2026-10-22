@@ -481,10 +481,27 @@ function blockOutlines(mask, w, h, minArea, minEdge = 0) {
       if (best && overlap(best, coarse) > 0.85 && !hasSpike(best)) outs.push(best);
       continue;
     }
+    // Squared only where the block really is square: a rounded end (a
+    // running track, a crescent) keeps its curve.
     const sq = squareUp(rough);
-    outs.push(sq && overlap(sq, coarse) > 0.9 ? sq : coarse);
+    outs.push(sq && overlap(sq, coarse) > 0.9 && farthest(coarse, sq) <= 2.5 ? sq : coarse);
   }
   return outs;
+}
+
+// How far the farthest point of one line is from another.
+function farthest(from, to) {
+  let worst = 0;
+  for (const p of from) {
+    let best = Infinity;
+    for (let i = 1; i < to.length; i++) {
+      const a = to[i - 1], b = to[i], dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy;
+      const t = l2 ? Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l2)) : 0;
+      best = Math.min(best, Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy));
+    }
+    worst = Math.max(worst, best);
+  }
+  return worst;
 }
 
 // A corner sharper than 30 degrees on a closed outline: a spike, not a block.
@@ -1024,8 +1041,9 @@ function bend(a, b, c) {
 
 // Takes out short detours off a straight run: points between two others
 // that are less than two street widths apart, with the line coming in and
-// going on in that same direction and nothing between straying more than
-// half a street width.
+// going on in that same direction, turning sharply off it and back, and
+// nothing between straying more than half a street width. A curve turns
+// gently all along, so it stays.
 function flattenBumps(l, W) {
   const closed = l.length > 3 && Math.hypot(l[0][0] - l[l.length - 1][0], l[0][1] - l[l.length - 1][1]) < 0.5;
   let pts = closed ? l.slice(0, -1) : l.slice();
@@ -1042,6 +1060,7 @@ function flattenBumps(l, W) {
     for (let j = Math.min(pts.length - 2, i + 8); j >= i + 2; j--) {
       const a = pts[i], b = pts[j], base = Math.hypot(b[0] - a[0], b[1] - a[1]);
       if (base < 1 || base > 2 * W) continue;
+      if (bend(pts[i - 1], a, pts[i + 1]) < Math.PI / 4 || bend(pts[j - 1], b, pts[j + 1]) < Math.PI / 4) continue;
       const u = unit(a, b);
       if (u[0] * unit(pts[i - 1], a)[0] + u[1] * unit(pts[i - 1], a)[1] < c20) continue;
       if (u[0] * unit(b, pts[j + 1])[0] + u[1] * unit(b, pts[j + 1])[1] < c20) continue;
