@@ -87,6 +87,11 @@ const atPiers = ([, y]) => y > 290 && y < 342;
 assert.ok(s.length && s.filter((p) => !atPiers(p)).every(([x]) => Math.abs(x - 960) < 6), 'shore follows the water edge');
 // (A pier drawn as an outlined patch of paper may come out as a block instead.)
 assert.ok(s.concat(e).filter(([x, y]) => x > 1090 && y > 308 && y < 324).length >= 2, 'outline runs into the slip between the piers');
+// The harbour is also a solid shape, with the piers left out of it.
+const waterArea = layers.find((l) => l.area);
+assert.ok(waterArea && waterArea.name === 'Water' && layers.indexOf(waterArea) === 0, 'water area layer, drawn first');
+const wa = pts(waterArea);
+assert.ok(wa.length && wa.every(([x]) => x > 950), 'water area stays in the harbour');
 // The railway is one line down the band, not in the street edges.
 const rl = pts(rail);
 assert.ok(rail && rl.every(([, y]) => Math.abs(y - 790) < 4) && rail.length > 840 * 0.8, `railway found (${Math.round(rail?.length || 0)} px)`);

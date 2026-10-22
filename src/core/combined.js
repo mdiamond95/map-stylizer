@@ -53,12 +53,23 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
   for (let i = 0; i < n; i++) if (!ink[i] && chroma[i] > 7 && L[i] > 55) fill[i] = 1;
   fill = open(fill, w, h, 1);
   keepFills(fill, A, B, w, h, 0.002 * n, 1500 * k * k);
+  // Water beside a bright fold or in a narrow lake tip can read darker than
+  // the paper round it and be taken for ink; its colour says it's water.
+  growByColour(fill, ink, L, A, B, w, h, 10, r(12));
   const fillNear = dilate(fill, w, h, r(3));
   for (let i = 0; i < n; i++) if (colourInk[i] && fillNear[i]) fill[i] = 1;
   fillHoles(fill, w, h, 1500 * k * k);
   // Ships and longer names drawn on the water are holes that are mostly ink;
   // islands are mostly paper and stay.
   fillHoles(fill, w, h, 0.002 * n, (cnt, inked) => inked > 0.35 * cnt, ink);
+  // Lettering printed on the water ("Maynards Lake") is water too, even
+  // where it touches the shore: small pieces of ink with water nearly all
+  // round them.
+  inkOnFill(ink, fill, w, h, 30 * k);
+  // Letters joined to the shore line are one big piece of ink, so they are
+  // taken in by closing the water over ink narrower than a letter instead.
+  const closed = close(fill, w, h, r(5));
+  for (let i = 0; i < n; i++) if (closed[i] && ink[i]) fill[i] = 1;
   fill = open(fill, w, h, 1);
 
   onProgress?.('Finding blocks');
@@ -221,8 +232,11 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
     let fa = 0, fb = 0, m = 0;
     for (let i = 0; i < n; i += 7) if (fill[i]) { fa += A[i]; fb += B[i]; m++; }
     // Greener or bluer than the paper reads as water.
-    const name = fa / m < paperAB[0] - 3 || fb / m < paperAB[1] - 6 ? 'Water edge' : `${colourName(c)} area edges`;
-    layers.push(layer(name, hex(c.map((v) => v * 0.55)), kept.fill));
+    const water = fa / m < paperAB[0] - 3 || fb / m < paperAB[1] - 6;
+    layers.push(layer(water ? 'Water edge' : `${colourName(c)} area edges`, hex(c.map((v) => v * 0.55)), kept.fill));
+    // The same areas as solid shapes, to colour in, drawn under the lines.
+    const areas = layer(water ? 'Water' : `${colourName(c)} areas`, hex(c), fillRings(fill, w, h, 1500 * k * k));
+    if (areas.count) layers.unshift({ ...areas, area: true });
   }
   // Lines in a second ink colour (a red grid, tram routes) pass through as
   // their own layers, one per colour.
@@ -401,6 +415,46 @@ function keepFills(mask, A, B, w, h, bigArea, minArea) {
     keep[l] = a >= bigArea || (bn && a >= minArea && Math.hypot(sa[l] / a - ba / bn, sb[l] / a - bb / bn) < 5) ? 1 : 0;
   }
   for (let i = 0; i < mask.length; i++) if (mask[i] && !keep[c.label[i]]) mask[i] = 0;
+}
+
+// Pixels within `tol` (Lab) of the fill's colour, joined to the fill, are fill
+// and not ink.
+function growByColour(fill, ink, L, A, B, w, h, tol, gap) {
+  const n = w * h;
+  let sl = 0, sa = 0, sb = 0, m = 0;
+  for (let i = 0; i < n; i++) if (fill[i]) { sl += L[i]; sa += A[i]; sb += B[i]; m++; }
+  if (!m) return;
+  sl /= m; sa /= m; sb /= m;
+  const like = new Uint8Array(n);
+  for (let i = 0; i < n; i++) like[i] = fill[i] || Math.hypot(L[i] - sl, A[i] - sa, B[i] - sb) < tol ? 1 : 0;
+  const c = components(like, w, h, true);
+  // Joined across a fold or a grid line, too.
+  const near = dilate(fill, w, h, gap);
+  const wet = new Uint8Array(c.count + 1);
+  for (let i = 0; i < n; i++) if (near[i]) wet[c.label[i]] = 1;
+  for (let i = 0; i < n; i++) if (like[i] && !fill[i] && wet[c.label[i]]) { fill[i] = 1; ink[i] = 0; }
+}
+
+// Small pieces of ink (lettering, up to `size` across) that are at least 70%
+// surrounded by the fill become part of it.
+function inkOnFill(ink, fill, w, h, size) {
+  const c = components(ink, w, h, true);
+  const wet = new Uint32Array(c.count + 1), dry = new Uint32Array(c.count + 1);
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const i = y * w + x;
+    if (ink[i]) continue;
+    // A paper or water pixel next to a piece of ink counts for that piece.
+    for (const j of [i - 1, i + 1, i - w, i + w]) {
+      const l = c.label[j];
+      if (!l) continue;
+      if (fill[i]) wet[l]++; else dry[l]++;
+    }
+  }
+  for (let i = 0; i < ink.length; i++) {
+    const l = c.label[i];
+    if (!l || c.x1[l] - c.x0[l] > size || c.y1[l] - c.y0[l] > size) continue;
+    if (wet[l] >= 0.7 * (wet[l] + dry[l])) fill[i] = 1;
+  }
 }
 
 // Fill holes in the mask smaller than maxArea (lettering left as holes in a
@@ -638,6 +692,27 @@ function streetCentres(space, w, h) {
   thin(m, w, h);
   const unit = Math.max(w, h);
   return prune(traceSkeleton(m, w, h), unit * 0.005, unit * 0.012).map((l) => simplify(l, 1.2)).filter((l) => lineLength(l) > unit * 0.004);
+}
+
+// The outline of each coloured area, and of each island in it, as closed
+// rings; filled even-odd, the islands come out as holes.
+function fillRings(fill, w, h, minArea) {
+  const rings = [];
+  const add = (c, l) => {
+    const ring = traceOutline(c.label, l, w, h, c.y0[l] * w + firstX(c.label, l, w, c.y0[l], c.x0[l], c.x1[l]));
+    if (ring.length >= 8) rings.push(simplify(ring.concat([ring[0]]), 1.2));
+  };
+  const wet = components(fill, w, h, true);
+  for (let l = 1; l <= wet.count; l++) if (wet.area[l] >= minArea) add(wet, l);
+  // Dry patches not touching the edge of the image are surrounded by water.
+  const dry = new Uint8Array(w * h);
+  for (let i = 0; i < dry.length; i++) dry[i] = fill[i] ? 0 : 1;
+  const land = components(dry, w, h, false);
+  for (let l = 1; l <= land.count; l++) {
+    if (land.area[l] < minArea || !land.x0[l] || !land.y0[l] || land.x1[l] === w - 1 || land.y1[l] === h - 1) continue;
+    add(land, l);
+  }
+  return rings;
 }
 
 // The edge of each coloured fill, as lines.

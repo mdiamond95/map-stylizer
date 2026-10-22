@@ -514,7 +514,7 @@ function getMatch() {
 function hasLines() { return !!project.linework?.layers?.length; }
 function linesOverlay() {
   if (!hasLines()) return '';
-  return project.linework.layers.filter((l) => l.show !== false).map((l) => `<path class="ck-lines" d="${l.d}" stroke="${l.colour}"/>`).join('');
+  return project.linework.layers.filter((l) => l.show !== false).map((l) => (l.area ? `<path class="ck-area" d="${l.d}" fill="${l.colour}"/>` : `<path class="ck-lines" d="${l.d}" stroke="${l.colour}"/>`)).join('');
 }
 
 async function refreshCheck() {
@@ -739,7 +739,8 @@ function onLinesDraw(phase, xy) {
     const steps = Math.max(1, Math.ceil(Math.hypot(xy[0] - from[0], xy[1] - from[1]) / (r * 0.5)));
     for (let k = 1; k <= steps; k++) {
       const p = [from[0] + (xy[0] - from[0]) * k / steps, from[1] + (xy[1] - from[1]) * k / steps];
-      tidy.lines.forEach((ls, i) => { if (project.linework.layers[i].show !== false) tidy.lines[i] = eraseCircle(ls, p, r, screenToImage(3)); });
+      // Areas (water) aren't rubbed out: cutting a shape's outline would spill its fill.
+      tidy.lines.forEach((ls, i) => { const l = project.linework.layers[i]; if (l.show !== false && !l.area) tidy.lines[i] = eraseCircle(ls, p, r, screenToImage(3)); });
     }
     tidy.last = xy;
     if (!tidy.frame) tidy.frame = requestAnimationFrame(() => { tidy.frame = 0; writeBack(tidy.lines.map((_, i) => i)); refreshCheck(); });
