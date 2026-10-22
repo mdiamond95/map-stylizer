@@ -9,8 +9,11 @@
 // piece. Lettering never gets two kinds of vote, so it drops out.
 // Two kinds of line no vote can find get their own finders: railways, drawn
 // as heavy hatched bands, and dashed lines, whose dashes are as small as
-// letters.
+// letters. Last, gaps the vote left (a line under a street name or a tram
+// route, a block missing a side) are filled in where the ink backs it up, as
+// a layer of their own to check.
 import { makeInkImage } from './match.js';
+import { inferLines } from './infer.js';
 import { LINEWORK_DEFAULTS, extractLinework, thin, traceSkeleton, prune, simplify, colourName, toPath, lineLength } from './linework.js';
 
 // Sizes below are tuned on a 3,000-pixel-wide city map and scaled from there.
@@ -49,7 +52,7 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
   let fill = new Uint8Array(n);
   for (let i = 0; i < n; i++) if (!ink[i] && chroma[i] > 7 && L[i] > 55) fill[i] = 1;
   fill = open(fill, w, h, 1);
-  keepBig(fill, w, h, 0.002 * n);
+  keepFills(fill, A, B, w, h, 0.002 * n, 1500 * k * k);
   const fillNear = dilate(fill, w, h, r(3));
   for (let i = 0; i < n; i++) if (colourInk[i] && fillNear[i]) fill[i] = 1;
   fillHoles(fill, w, h, 1500 * k * k);
@@ -192,6 +195,11 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
   unsureLeft = unsureLeft.concat(others);
   const gaps = closeGaps(kept.edges, 10 * k);
 
+  onProgress?.('Filling in missing lines');
+  // Not along railways or dashed lines, which have layers of their own.
+  const avoid = dilate(rasterise(rails.concat(dashed), w, h), w, h, R + r(3));
+  const filled = fillIn({ inkImg, ink, colourInk, fill, crop, blockMask, avoid, edges: kept.edges.concat(gaps), shore: kept.fill, w, h, k });
+  unsureLeft = unsureLeft.concat(filled.creases);
 
   onProgress?.('Sorting layers');
   const scaled = (ls) => ls.filter((l) => l.length > 1).map((l) => l.map(([x, y]) => [x * out, y * out]));
@@ -200,7 +208,10 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
     return { name, colour, count: ls.length, length: ls.reduce((s, l) => s + lineLength(l), 0), d: toPath(ls), show };
   };
   const main = plain.layers[0];
-  const layers = [layer('Street and block edges', main?.colour || '#2b2f3a', kept.edges.concat(gaps))];
+  const layers = [layer('Street and block edges', main?.colour || '#2b2f3a', filled.edges)];
+  // Filled-in lines are guesses, so they get a colour of their own to check
+  // them by; recolour the layer to match once happy.
+  layers.push(layer('Filled-in lines', '#8a3ffc', filled.inferred));
   if (kept.fill.length) {
     const c = meanColour(rgba, fill, n);
     let fa = 0, fb = 0, m = 0;
@@ -294,20 +305,28 @@ function close(mask, w, h, r) { return erode(dilate(mask, w, h, r), w, h, r); }
 function morph(mask, w, h, r, grow) {
   const tmp = new Uint8Array(w * h), outm = new Uint8Array(w * h);
   // Count of set pixels in a sliding window: any (grow) or all (shrink).
-  const pass = (src, dst, len, lines, at) => {
-    for (let line = 0; line < lines; line++) {
-      let c = 0;
-      for (let t = 0; t < Math.min(r, len); t++) c += src[at(line, t)];
-      for (let t = 0; t < len; t++) {
-        if (t + r < len) c += src[at(line, t + r)];
-        if (t - r - 1 >= 0) c -= src[at(line, t - r - 1)];
-        const span = Math.min(len - 1, t + r) - Math.max(0, t - r) + 1;
-        dst[at(line, t)] = grow ? (c > 0 ? 1 : 0) : (c === span ? 1 : 0);
-      }
+  // Along each row, then down the columns, keeping a running count per
+  // column so the image is read in order.
+  for (let y = 0, base = 0; y < h; y++, base += w) {
+    let c = 0;
+    for (let x = 0; x < Math.min(r, w); x++) c += mask[base + x];
+    for (let x = 0; x < w; x++) {
+      if (x + r < w) c += mask[base + x + r];
+      if (x > r) c -= mask[base + x - r - 1];
+      tmp[base + x] = grow ? +(c > 0) : +(c === Math.min(w - 1, x + r) - Math.max(0, x - r) + 1);
     }
-  };
-  pass(mask, tmp, w, h, (y, x) => y * w + x);
-  pass(tmp, outm, h, w, (x, y) => y * w + x);
+  }
+  const cnt = new Int32Array(w);
+  for (let y = 0; y < Math.min(r, h); y++) for (let x = 0, i = y * w; x < w; x++, i++) cnt[x] += tmp[i];
+  for (let y = 0; y < h; y++) {
+    const add = y + r < h ? (y + r) * w : -1, sub = y > r ? (y - r - 1) * w : -1;
+    const span = Math.min(h - 1, y + r) - Math.max(0, y - r) + 1;
+    if (add >= 0) for (let x = 0; x < w; x++) cnt[x] += tmp[add + x];
+    if (sub >= 0) for (let x = 0; x < w; x++) cnt[x] -= tmp[sub + x];
+    const row = y * w;
+    if (grow) for (let x = 0; x < w; x++) outm[row + x] = +(cnt[x] > 0);
+    else for (let x = 0; x < w; x++) outm[row + x] = +(cnt[x] === span);
+  }
   return outm;
 }
 
@@ -364,9 +383,20 @@ function components(mask, w, h, diagonal) {
   return { label, count, area, x0, y0, x1, y1 };
 }
 
-function keepBig(mask, w, h, minArea) {
+// Keeps the big coloured areas, and smaller ones (a lake, a pond) the same
+// colour as the big ones.
+function keepFills(mask, A, B, w, h, bigArea, minArea) {
   const c = components(mask, w, h, true);
-  for (let i = 0; i < mask.length; i++) if (mask[i] && c.area[c.label[i]] < minArea) mask[i] = 0;
+  const sa = new Float64Array(c.count + 1), sb = new Float64Array(c.count + 1);
+  for (let i = 0; i < mask.length; i++) { const l = c.label[i]; if (l) { sa[l] += A[i]; sb[l] += B[i]; } }
+  let ba = 0, bb = 0, bn = 0;
+  for (let l = 1; l <= c.count; l++) if (c.area[l] >= bigArea) { ba += sa[l]; bb += sb[l]; bn += c.area[l]; }
+  const keep = new Uint8Array(c.count + 1);
+  for (let l = 1; l <= c.count; l++) {
+    const a = c.area[l];
+    keep[l] = a >= bigArea || (bn && a >= minArea && Math.hypot(sa[l] / a - ba / bn, sb[l] / a - bb / bn) < 5) ? 1 : 0;
+  }
+  for (let i = 0; i < mask.length; i++) if (mask[i] && !keep[c.label[i]]) mask[i] = 0;
 }
 
 // Fill holes in the mask smaller than maxArea (lettering left as holes in a
@@ -428,7 +458,9 @@ function boxesOfPrint(ink, pc, w, h) {
 // ---------- shapes ----------
 
 // Outline of each block, simplified, then squared up where that keeps the shape.
-function blockOutlines(mask, w, h, minArea) {
+// With minEdge, only outlines drawn with straight edges at least that long on
+// average (a block, not the ragged edge of hillside hatching).
+function blockOutlines(mask, w, h, minArea, minEdge = 0) {
   const c = components(mask, w, h, true);
   const outs = [];
   for (let l = 1; l <= c.count; l++) {
@@ -436,7 +468,9 @@ function blockOutlines(mask, w, h, minArea) {
     const ring = traceOutline(c.label, l, w, h, c.y0[l] * w + firstX(c.label, l, w, c.y0[l], c.x0[l], c.x1[l]));
     if (ring.length < 8) continue;
     const coarse = simplify(ring.concat([ring[0]]), 1.5);
-    const sq = squareUp(simplify(ring.concat([ring[0]]), 2.5));
+    const rough = simplify(ring.concat([ring[0]]), 2.5);
+    if (minEdge && lineLength(rough) / (rough.length - 1) < minEdge) continue;
+    const sq = squareUp(rough);
     outs.push(sq && overlap(sq, coarse) > 0.9 ? sq : coarse);
   }
   return outs;
@@ -742,4 +776,131 @@ function closeGaps(lines, maxGap) {
 function scalePath(d, s) {
   if (s === 1) return d;
   return d.replace(/-?[\d.]+/g, (v) => String(Math.round(+v * s * 10) / 10));
+}
+
+// ---------- filling in ----------
+
+// Lines the vote left broken or never found, guessed from the lines round
+// them and checked against the ink (loose ends in infer.js, whole blocks in
+// moreBlocks). Also takes out paper fold creases, which read as long faint
+// straight lines. avoid: where no loose end should be carried on (railways,
+// dashed lines). Returns { edges, inferred, creases }.
+function fillIn({ inkImg, ink, colourInk, fill, crop, blockMask, avoid, edges, shore, w, h, k }) {
+  const n = w * h;
+  const strong = strongInk(inkImg, ink, w, h);
+  const strongNear = dilate(strong, w, h, 2);
+  const kept = [], creases = [];
+  for (const l of edges) splitFaint(l, strongNear, 40 * k, w, h, kept, creases);
+  const evidence = new Uint8Array(n), skip = new Uint8Array(n);
+  // Not in the water, boxes of print, or the margin (the map's frame).
+  const water = erode(fill, w, h, 2), margin = Math.round(0.03 * Math.max(w, h));
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x;
+    evidence[i] = strong[i] || colourInk[i] ? 1 : 0;
+    skip[i] = water[i] || crop[i] || x < margin || y < margin || x >= w - margin || y >= h - margin ? 1 : 0;
+  }
+  const skipLines = avoid ? skip.map((v, i) => v || avoid[i]) : skip;
+  const loose = inferLines(kept.concat(shore), evidence, skipLines, w, h, k).lines;
+  // Blocks keep further from boxes of print, whose frames make good fake blocks.
+  const cropNear = dilate(crop, w, h, Math.round(15 * k));
+  for (let i = 0; i < n; i++) if (cropNear[i]) skip[i] = 1;
+  const blocks = moreBlocks(strong, colourInk, skip, blockMask, kept.concat(shore, loose), w, h, k);
+  return { edges: kept, inferred: loose.concat(blocks), creases };
+}
+
+// Printed ink is much darker than a crease's shadow or a stain: halfway
+// between the paper and the typical ink.
+function strongInk(img, ink, w, h) {
+  const n = w * h, hist = new Uint32Array(101);
+  let m = 0;
+  for (let i = 0; i < n; i += 5) if (ink[i]) { const x = i % w; hist[Math.min(100, Math.round((100 * img.gray[i]) / Math.max(1, paperAt(img, x, (i - x) / w))))]++; m++; }
+  let med = 0;
+  for (let acc = 0; med < 100; med++) { acc += hist[med]; if (acc >= m / 2) break; }
+  const cut = Math.min(0.9, Math.max(0.5, (1 + med / 100) / 2));
+  const out = new Uint8Array(n);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const i = y * w + x; if (ink[i] && img.gray[i] < paperAt(img, x, y) * cut) out[i] = 1; }
+  return out;
+}
+
+// Splits off long straight stretches with almost no strong ink under them.
+function splitFaint(l, strongNear, minLen, w, h, kept, faint) {
+  let run = [l[0]];
+  for (let i = 1; i < l.length; i++) {
+    const seg = [l[i - 1], l[i]];
+    if (lineLength(seg) > minLen && meanAlong(seg, strongNear, w, h) < 0.3) {
+      if (run.length > 1) kept.push(run);
+      faint.push(seg);
+      run = [l[i]];
+    } else run.push(l[i]);
+  }
+  if (run.length > 1) kept.push(run);
+}
+
+// Blocks the first pass missed: patches of paper that are fully enclosed
+// once coloured ink (a tram route printed over a block's edge) and the lines
+// already found count as edges too, with faint creases not counting. Returns
+// the new blocks' outlines where no line runs yet.
+function moreBlocks(strong, colourInk, skip, blockMask, known, w, h, k) {
+  const n = w * h;
+  const r = (px) => Math.max(1, Math.round(px * k));
+  const knownMask = rasterise(known, w, h);
+  let wall = new Uint8Array(n);
+  for (let i = 0; i < n; i++) wall[i] = strong[i] || colourInk[i] || knownMask[i] ? 1 : 0;
+  wall = dilate(wall, w, h, 1);
+  const paper = new Uint8Array(n);
+  for (let i = 0; i < n; i++) paper[i] = !wall[i] ? 1 : 0;
+  const pc = components(paper, w, h, false);
+  const depth = chamfer(paper, w, h);
+  const maxw = new Float32Array(pc.count + 1), clear = new Uint8Array(pc.count + 1).fill(1), had = new Uint32Array(pc.count + 1);
+  for (let i = 0; i < n; i++) { const l = pc.label[i]; if (!l) continue; if (depth[i] > maxw[l]) maxw[l] = depth[i]; if (blockMask[i]) had[l]++; if (skip[i]) clear[l] = 0; }
+  // Block-sized, wide enough not to be a street, compact, clear of water,
+  // print and the margin, and not one the first pass already has.
+  const keep = new Uint8Array(pc.count + 1);
+  let any = 0;
+  for (let l = 1; l <= pc.count; l++) {
+    const a = pc.area[l], bw = pc.x1[l] - pc.x0[l] + 1, bh = pc.y1[l] - pc.y0[l] + 1;
+    if (a < 150 * k * k || a > 0.01 * n || maxw[l] < 6 * k || !clear[l] || had[l] > 0.8 * a || a / (bw * bh) < 0.4) continue;
+    keep[l] = 1; any++;
+  }
+  if (!any) return [];
+  const found = new Uint8Array(n);
+  for (let i = 0; i < n; i++) if (keep[pc.label[i]]) found[i] = 1;
+  const mask = open(dilate(found, w, h, 2), w, h, r(2));
+  const shapes = blockOutlines(mask, w, h, 150 * k * k, 12 * k);
+  // A block mostly outlined already adds nothing. An edge along coloured ink
+  // with block on both sides is a grid line cutting a block in two, not a
+  // street edge under a tram route.
+  const R = Math.max(3, r(3)), near = dilate(knownMask, w, h, R), colourNear = dilate(colourInk, w, h, r(2)), piece = 8 * k, out = [];
+  const side = 6 * k;
+  const isBlock = (x, y) => { const i = idx(x, y, w, h); return blockMask[i] || mask[i]; };
+  const cut = (pts) => {
+    let both = 0;
+    for (let j = 1; j < pts.length; j++) {
+      const [ax, ay] = pts[j - 1], [bx, by] = pts[j], l = Math.hypot(bx - ax, by - ay) || 1;
+      const nx = (-(by - ay) / l) * side, ny = ((bx - ax) / l) * side;
+      if (isBlock(bx + nx, by + ny) && isBlock(bx - nx, by - ny)) both++;
+    }
+    return both > 0.5 * (pts.length - 1);
+  };
+  // Its edge must be printed nearly all the way round: an open area fenced
+  // by dotted paths or hatching isn't a block.
+  const printed = new Uint8Array(n);
+  for (let i = 0; i < n; i++) printed[i] = strong[i] || colourInk[i] ? 1 : 0;
+  const printedNear = dilate(printed, w, h, r(2) + 1);
+  for (const line of shapes) {
+    if (meanAlong(line, near, w, h) > 0.95 || meanAlong(line, printedNear, w, h) < 0.9) continue;
+    const total = lineLength(line), pieces = Math.max(1, Math.round(total / piece));
+    let start = -1;
+    for (let p = 0; p <= pieces; p++) {
+      let fresh = false;
+      if (p < pieces) {
+        const pts = samplePath(line, (p * total) / pieces, ((p + 1) * total) / pieces, 2);
+        const frac = (m) => pts.reduce((s, [x, y]) => s + m[idx(x, y, w, h)], 0) / pts.length;
+        fresh = frac(near) < 0.6 && !(frac(colourNear) >= 0.5 && cut(pts));
+      }
+      if (fresh && start < 0) start = p;
+      if (!fresh && start >= 0) { out.push(subPath(line, (start * total) / pieces, (p * total) / pieces)); start = -1; }
+    }
+  }
+  return out;
 }

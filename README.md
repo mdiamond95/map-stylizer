@@ -43,6 +43,12 @@ the lines before they are traced, so streets don't zigzag up through the letters
 fills a street completely, a stretch of the street's edge can go with it; untick the box and pull
 again if you'd rather keep those and tidy by hand.
 
+The **Combined** method also fills in gaps on its own: a street edge hidden under a name or a
+tram route, a corner left open, a block missing a side, or a whole block that only closes up once
+the coloured route over its edge counts as edge. It only fills a gap where ink runs under it, so
+a street crossing stays open. Its guesses go in **Filled-in lines**, purple so they're easy to
+check; tap away any that are wrong, then recolour the layer to match the streets.
+
 **Tidy by hand** (under the colour list) cleans up whatever is left: tap a leftover squiggle to
 delete that line, or drag one finger to rub out bits of line with the eraser. Two fingers still
 move and zoom, and **Undo** steps back. Edits are saved with the project and go into the export.
