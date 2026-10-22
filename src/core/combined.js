@@ -195,10 +195,14 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
   unsureLeft = unsureLeft.concat(others);
   const gaps = closeGaps(kept.edges, 10 * k);
 
+  onProgress?.('Evening out');
+  const even = evenOut([kept.edges.concat(gaps)], spaceDepth, centres, w, h, k);
+  unsureLeft = unsureLeft.concat(even.dropped);
+
   onProgress?.('Filling in missing lines');
   // Not along railways or dashed lines, which have layers of their own.
   const avoid = dilate(rasterise(rails.concat(dashed), w, h), w, h, R + r(3));
-  const filled = fillIn({ inkImg, ink, colourInk, fill, crop, blockMask, avoid, edges: kept.edges.concat(gaps), shore: kept.fill, w, h, k });
+  const filled = fillIn({ inkImg, ink, colourInk, fill, crop, blockMask, avoid, edges: even.groups[0], shore: kept.fill, w, h, k });
   unsureLeft = unsureLeft.concat(filled.creases);
 
   onProgress?.('Sorting layers');
@@ -946,4 +950,121 @@ function moreBlocks(strong, colourInk, skip, blockMask, known, w, h, k) {
     }
   }
   return out;
+}
+
+// ---------- evening out ----------
+
+// Streets keep much the same width, so the usual width is the yardstick for
+// what a real line can do: an edge doesn't jut a little way into the road and
+// come back (lettering touching it), a line end doesn't hook off into the
+// road, and a short stub sticking off a line into the road is a scrap of
+// lettering, not a street. groups: lists of lines, checked together.
+// Returns { groups, dropped }.
+function evenOut(groups, spaceDepth, centres, w, h, k) {
+  // Usual street width: twice the distance from a street's centre line to its edges.
+  const widths = [];
+  for (const l of centres) for (const [x, y] of samplePath(l, 0, lineLength(l), 6)) { const d = spaceDepth[idx(x, y, w, h)]; if (d > 1 && d < 100 * k) widths.push(2 * d); }
+  widths.sort((a, b) => a - b);
+  const W = widths.length > 50 ? widths[widths.length >> 1] : 20 * k;
+  const dropped = [];
+  // Pieces that meet end to end are joined first, so a jog that straddles
+  // two pieces shows up as one.
+  let kept = [];
+  groups.forEach((ls, g) => { for (const l of joinEnds(ls)) { const t = trimHooks(flattenBumps(l, W), W); if (t.length > 1) kept.push(Object.assign(t, { g })); } });
+  // Stubs: short lines with a free end. A few rounds, as a zigzag of
+  // lettering comes off one stub at a time.
+  for (let round = 0; round < 3; round++) {
+    const owner = new Int32Array(w * h);
+    kept.forEach((l, i) => { for (const [x, y] of samplePath(l, 0, lineLength(l), 0.7)) owner[idx(x, y, w, h)] = i + 1; });
+    const free = (p, id) => {
+      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) { const o = owner[idx(p[0] + dx, p[1] + dy, w, h)]; if (o && o !== id) return false; }
+      return true;
+    };
+    const before = kept.length;
+    kept = kept.filter((l, i) => {
+      if (lineLength(l) >= 1.5 * W || Math.hypot(l[0][0] - l[l.length - 1][0], l[0][1] - l[l.length - 1][1]) < 0.5) return true;
+      if (!free(l[0], i + 1) && !free(l[l.length - 1], i + 1)) return true;
+      dropped.push(l);
+      return false;
+    });
+    if (kept.length === before) break;
+  }
+  return { groups: groups.map((_, g) => kept.filter((l) => l.g === g)), dropped };
+}
+
+// Joins lines whose ends meet where no third line ends too.
+function joinEnds(lines) {
+  const ls = lines.filter((l) => l.length > 1).map((l) => l.slice());
+  const key = (p) => `${Math.round(p[0] / 2)},${Math.round(p[1] / 2)}`;
+  const at = new Map();
+  ls.forEach((l, i) => [0, 1].forEach((s) => { const kk = key(s ? l[l.length - 1] : l[0]); if (!at.has(kk)) at.set(kk, []); at.get(kk).push([i, s]); }));
+  const alive = ls.map(() => true), into = ls.map((_, i) => i);
+  const find = (i) => { while (into[i] !== i) i = into[i] = into[into[i]]; return i; };
+  for (const ends of at.values()) {
+    if (ends.length !== 2) continue;
+    let [[i, si], [j, sj]] = ends;
+    i = find(i); j = find(j);
+    if (i === j) continue;
+    // Each end has to still be an end of the joined line it now belongs to.
+    const a = ls[i], b = ls[j], pa = key(si ? a[a.length - 1] : a[0]), pb = key(sj ? b[b.length - 1] : b[0]);
+    const aEnd = key(a[a.length - 1]) === pa ? 1 : key(a[0]) === pa ? 0 : -1, bEnd = key(b[b.length - 1]) === pb ? 1 : key(b[0]) === pb ? 0 : -1;
+    if (aEnd < 0 || bEnd < 0) continue;
+    const left = aEnd ? a : a.slice().reverse(), right = bEnd ? b.slice().reverse() : b;
+    ls[i] = left.concat(right.slice(1));
+    alive[j] = false; into[j] = i;
+  }
+  return ls.filter((_, i) => alive[i]);
+}
+
+// How far a line turns at b, in radians.
+function bend(a, b, c) {
+  const u = [b[0] - a[0], b[1] - a[1]], v = [c[0] - b[0], c[1] - b[1]];
+  return Math.acos(Math.max(-1, Math.min(1, (u[0] * v[0] + u[1] * v[1]) / ((Math.hypot(...u) * Math.hypot(...v)) || 1))));
+}
+
+// Takes out short detours off a straight run: points between two others
+// that are less than two street widths apart, with the line coming in and
+// going on in that same direction and nothing between straying more than
+// half a street width.
+function flattenBumps(l, W) {
+  const closed = l.length > 3 && Math.hypot(l[0][0] - l[l.length - 1][0], l[0][1] - l[l.length - 1][1]) < 0.5;
+  let pts = closed ? l.slice(0, -1) : l.slice();
+  // A closed outline is walked from the start of its longest side, so no
+  // detour straddles the join.
+  if (closed) {
+    let best = 0, bl = 0;
+    for (let i = 0; i < pts.length; i++) { const a = pts[i], b = pts[(i + 1) % pts.length], d = Math.hypot(b[0] - a[0], b[1] - a[1]); if (d > bl) { bl = d; best = i; } }
+    pts = pts.slice(best).concat(pts.slice(0, best), [pts[best]]);
+  }
+  const unit = (a, b) => { const d = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1; return [(b[0] - a[0]) / d, (b[1] - a[1]) / d]; };
+  const c20 = Math.cos(Math.PI / 9);
+  for (let i = 1; i < pts.length - 2; i++) {
+    for (let j = Math.min(pts.length - 2, i + 8); j >= i + 2; j--) {
+      const a = pts[i], b = pts[j], base = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      if (base < 1 || base > 2 * W) continue;
+      const u = unit(a, b);
+      if (u[0] * unit(pts[i - 1], a)[0] + u[1] * unit(pts[i - 1], a)[1] < c20) continue;
+      if (u[0] * unit(b, pts[j + 1])[0] + u[1] * unit(b, pts[j + 1])[1] < c20) continue;
+      let far = 0;
+      for (let m = i + 1; m < j; m++) far = Math.max(far, Math.abs((pts[m][0] - a[0]) * u[1] - (pts[m][1] - a[1]) * u[0]));
+      if (far > 0.5 * W) continue;
+      pts.splice(i + 1, j - i - 1);
+      break;
+    }
+  }
+  // Points left in a straight row merge.
+  return simplify(pts, 0.75);
+}
+
+// A line end that turns sharply off for less than half a street width is a
+// hook into the road (a letter's stroke), not part of the line.
+function trimHooks(l, W) {
+  const turn = (a, b, c) => { const u = [b[0] - a[0], b[1] - a[1]], v = [c[0] - b[0], c[1] - b[1]]; return (u[0] * v[0] + u[1] * v[1]) / ((Math.hypot(...u) * Math.hypot(...v)) || 1); };
+  let pts = l;
+  for (let pass = 0; pass < 2 && pts.length > 2; pass++) {
+    const n = pts.length;
+    if (Math.hypot(pts[n - 1][0] - pts[n - 2][0], pts[n - 1][1] - pts[n - 2][1]) < 0.5 * W && turn(pts[n - 3], pts[n - 2], pts[n - 1]) < Math.cos(Math.PI / 4)) pts = pts.slice(0, -1);
+    if (pts.length > 2 && Math.hypot(pts[1][0] - pts[0][0], pts[1][1] - pts[0][1]) < 0.5 * W && turn(pts[2], pts[1], pts[0]) < Math.cos(Math.PI / 4)) pts = pts.slice(1);
+  }
+  return pts;
 }

@@ -47,7 +47,10 @@ The **Combined** method also fills in gaps on its own: a street edge hidden unde
 tram route, a corner left open, a block missing a side, or a whole block that only closes up once
 the coloured route over its edge counts as edge. It only fills a gap where ink runs under it, so
 a street crossing stays open. Its guesses go in **Filled-in lines**, purple so they're easy to
-check; tap away any that are wrong, then recolour the layer to match the streets.
+check; tap away any that are wrong, then recolour the layer to match the streets. Filled-in lines
+are always straight. It also evens out the edges using the usual width of the roads as a yardstick:
+small jogs where lettering touched an edge are straightened, hooked line ends are trimmed, and
+short stubs poking into a road are moved to Unsure lines.
 
 **Tidy by hand** (under the colour list) cleans up whatever is left: tap a leftover squiggle to
 delete that line, or drag one finger to rub out bits of line with the eraser. Two fingers still
