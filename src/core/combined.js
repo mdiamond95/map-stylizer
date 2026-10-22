@@ -1227,7 +1227,8 @@ export function framesAndBoxes(ink, w, h, k, isBlock) {
   const minLen = Math.round(100 * k), tol = 10 * k;
   const c = components(ink, w, h, true);
   const H = straightRuns(ink, w, h, minLen, true).filter((s) => s[3] <= 40 * k);
-  const V = straightRuns(ink, w, h, minLen, false).filter((s) => s[3] <= 40 * k);
+  // Box sides are as short as the box is tall.
+  const V = straightRuns(ink, w, h, Math.round(30 * k), false).filter((s) => s[3] <= 40 * k);
   const edge = 0.08;
   // The border is often a band of lines; its inner edge counts.
   const pick = (segs, size, along, near) => segs.filter((s) => s[1] - s[0] > 0.5 * along && (near ? s[2] < edge * size : s[2] > (1 - edge) * size)).map((s) => s[2] + (near ? 1 : -1) * s[3] / 2);
@@ -1235,7 +1236,7 @@ export function framesAndBoxes(ink, w, h, k, isBlock) {
   const neat = top.length && bottom.length && left.length && right.length ? [Math.max(...left), Math.max(...top), Math.min(...right), Math.min(...bottom)] : null;
   const boxes = [];
   for (const [ax0, ax1, ay] of H) for (const [bx0, bx1, by] of H) {
-    if (by <= ay + 60 * k) continue;
+    if (by <= ay + 30 * k) continue;
     const x0 = Math.max(ax0, bx0), x1 = Math.min(ax1, bx1);
     if (x1 - x0 < 0.8 * Math.max(ax1 - ax0, bx1 - bx0)) continue;
     const l = Math.min(ax0, bx0), r = Math.max(ax1, bx1);
@@ -1248,7 +1249,7 @@ export function framesAndBoxes(ink, w, h, k, isBlock) {
     };
     if (!side(l) || !side(r)) continue;
     const area = (r - l) * (by - ay);
-    if (area < 0.004 * w * h || area > 0.2 * w * h) continue;
+    if (area < 2000 * k * k || area > 0.2 * w * h) continue;
     if (neat && l <= neat[0] + tol && r >= neat[2] - tol) continue;
     // Dense woods also have straight edges; a box is mostly paper inside.
     let inkIn = 0, m = 0;
