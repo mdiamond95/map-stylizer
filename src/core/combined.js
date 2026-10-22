@@ -1488,18 +1488,21 @@ function railLines(ink, fill, crop, w, h, k, inMargin) {
 // Dashed lines (paths, boundaries, planned streets) are rows of short
 // straight dashes, each as small as a letter, so every other method throws
 // them away. Find the dash-shaped bits of ink and chain the ones that line up
-// end to end; four or more in a row make a dashed line.
+// end to end; four or more in a row make a dashed line. A dashed outline
+// turns its corners with a bent dash (an L), which carries the chain round.
 function dashedLines(ink, skip, w, h, k, inMargin) {
   const n = w * h;
   const seen = new Uint8Array(n), stack = new Int32Array(n);
-  const dashes = [];
+  const dashes = [], maxWid = Math.max(2.5, 3.5 * k);
   for (let s = 0; s < n; s++) {
     if (!ink[s] || seen[s]) continue;
     let top = 0, m = 0, sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0, x0 = w, x1 = 0, y0 = h, y1 = 0;
+    const px = [];
     stack[top++] = s; seen[s] = 1;
     while (top) {
       const i = stack[--top], x = i % w, y = (i - x) / w;
       m++; sx += x; sy += y; sxx += x * x; syy += y * y; sxy += x * y;
+      if (px.length < 2000) px.push(i);
       if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
       for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
         const xx = x + dx, yy = y + dy;
@@ -1512,11 +1515,29 @@ function dashedLines(ink, skip, w, h, k, inMargin) {
     if (m < 3 || ext < 3 || ext > 22 * k) continue;
     // Length and width from the spread of the dash's pixels.
     const mx = sx / m, my = sy / m, cxx = sxx / m - mx * mx, cyy = syy / m - my * my, cxy = sxy / m - mx * my;
+    if (skip(Math.round(my) * w + Math.round(mx)) || inMargin([mx, my])) continue;
     const disc = Math.sqrt(Math.max(0, ((cxx - cyy) / 2) ** 2 + cxy * cxy));
     const len = Math.sqrt(12 * ((cxx + cyy) / 2 + disc)), wid = Math.sqrt(12 * Math.max(0, (cxx + cyy) / 2 - disc)) || 1;
-    if (len < 2.5 * wid || wid > Math.max(2.5, 3.5 * k) || skip(Math.round(my) * w + Math.round(mx)) || inMargin([mx, my])) continue;
-    const th = 0.5 * Math.atan2(2 * cxy, cxx - cyy), d = [Math.cos(th), Math.sin(th)];
-    dashes.push({ d, len, ends: [[mx - (d[0] * len) / 2, my - (d[1] * len) / 2], [mx + (d[0] * len) / 2, my + (d[1] * len) / 2]] });
+    if (len >= 2.5 * wid && wid <= maxWid) {
+      const th = 0.5 * Math.atan2(2 * cxy, cxx - cyy), d = [Math.cos(th), Math.sin(th)];
+      const ends = [[mx - (d[0] * len) / 2, my - (d[1] * len) / 2], [mx + (d[0] * len) / 2, my + (d[1] * len) / 2]];
+      dashes.push({ d, len, ends, out: [[-d[0], -d[1]], d], path: ends });
+      continue;
+    }
+    // A bent dash: two thin arms meeting near a right angle.
+    const P = px.map((i) => [i % w, (i - (i % w)) / w]);
+    const farFrom = ([ax, ay]) => P.reduce((b, p) => ((p[0] - ax) ** 2 + (p[1] - ay) ** 2 > (b[0] - ax) ** 2 + (b[1] - ay) ** 2 ? p : b), P[0]);
+    const e1 = farFrom([mx, my]), e2 = farFrom(e1), L12 = Math.hypot(e2[0] - e1[0], e2[1] - e1[1]) || 1;
+    const c = P.reduce((b, p) => {
+      const dp = Math.abs((e2[0] - e1[0]) * (e1[1] - p[1]) - (e1[0] - p[0]) * (e2[1] - e1[1])), db = Math.abs((e2[0] - e1[0]) * (e1[1] - b[1]) - (e1[0] - b[0]) * (e2[1] - e1[1]));
+      return dp > db ? p : b;
+    }, P[0]);
+    const a1 = Math.hypot(e1[0] - c[0], e1[1] - c[1]), a2 = Math.hypot(e2[0] - c[0], e2[1] - c[1]);
+    const thick = m / (a1 + a2 + 1);
+    const turn = ((e1[0] - c[0]) * (e2[0] - c[0]) + (e1[1] - c[1]) * (e2[1] - c[1])) / (a1 * a2 || 1);
+    if (thick > maxWid || Math.min(a1, a2) < 2.5 * thick || Math.abs(turn) > 0.5 || L12 < 3 * thick) continue;
+    const o1 = [(e1[0] - c[0]) / a1, (e1[1] - c[1]) / a1], o2 = [(e2[0] - c[0]) / a2, (e2[1] - c[1]) / a2];
+    dashes.push({ d: null, len: Math.max(a1, a2), ends: [e1, e2], out: [o1, o2], path: [e1, c, e2], bent: true });
   }
   // Pair up dash ends that face each other across a short gap, closest first.
   const cell = 16 * k, grid = new Map();
@@ -1525,15 +1546,15 @@ function dashedLines(ink, skip, w, h, k, inMargin) {
   const cos = (a, b) => a[0] * b[0] + a[1] * b[1], c20 = Math.cos(Math.PI / 9), c25 = Math.cos((25 * Math.PI) / 180);
   const pairs = [];
   dashes.forEach((q, i) => q.ends.forEach((e, s) => {
-    const outward = s ? q.d : [-q.d[0], -q.d[1]];
+    const outward = q.out[s];
     const cx = Math.floor(e[0] / cell), cy = Math.floor(e[1] / cell);
     for (let gy = cy - 1; gy <= cy + 1; gy++) for (let gx = cx - 1; gx <= cx + 1; gx++) for (const [j, t] of grid.get(`${gx},${gy}`) || []) {
       if (j <= i) continue;
       const p = dashes[j], f = p.ends[t];
       const vx = f[0] - e[0], vy = f[1] - e[1], dist = Math.hypot(vx, vy);
       if (dist < 0.5 || dist > Math.max(3, Math.min(14 * k, 1.5 * Math.max(q.len, p.len)))) continue;
-      const inward = t ? [-p.d[0], -p.d[1]] : p.d;
-      if (Math.abs(cos(q.d, p.d)) < c20 || cos([vx / dist, vy / dist], outward) < c25 || cos(outward, inward) < c20) continue;
+      const inward = [-p.out[t][0], -p.out[t][1]];
+      if (cos([vx / dist, vy / dist], outward) < c25 || cos(outward, inward) < c20) continue;
       pairs.push({ dist, a: [i, s], b: [j, t] });
     }
   }));
@@ -1543,21 +1564,26 @@ function dashedLines(ink, skip, w, h, k, inMargin) {
     if (link[a[0]][a[1]] || link[b[0]][b[1]]) continue;
     link[a[0]][a[1]] = b; link[b[0]][b[1]] = a;
   }
-  // Walk each chain from one end.
+  // Walk each chain from one end. Four straight dashes in a row make a
+  // dashed line, or three turning a corner; bent dashes alone don't, so a
+  // few strokes of lettering can't make a chain on their own.
   const used = new Uint8Array(dashes.length), out = [];
   for (let i = 0; i < dashes.length; i++) {
     if (used[i]) continue;
     let cur = i, side = 0;
     for (let guard = 0; link[cur][side] && guard < dashes.length; guard++) { const [j, t] = link[cur][side]; if (j === i) break; cur = j; side = 1 - t; }
     const chain = [];
+    let straight = 0, bent = 0;
     for (let guard = 0; cur != null && !used[cur] && guard < dashes.length; guard++) {
       used[cur] = 1;
-      chain.push(dashes[cur].ends[side], dashes[cur].ends[1 - side]);
+      const q = dashes[cur];
+      if (q.bent) bent++; else straight++;
+      chain.push(...(side ? q.path.slice().reverse() : q.path));
       const next = link[cur][1 - side];
       if (!next) break;
       [cur, side] = next;
     }
-    if (chain.length >= 8) out.push(chain);
+    if (straight >= 4 || (straight >= 3 && bent)) out.push(chain);
   }
   return out;
 }
@@ -1898,7 +1924,6 @@ function straightenTeeth(l, lw, ink, w, h) {
     at = b + 1;
   }
   for (let i = at; i < n; i++) out.push(pts[i]);
-  if (globalThis.TEETH) globalThis.TEETH.push(...runs.map(([a, b, f]) => [onto(f, pts[a]), onto(f, pts[b])]));
   // A closed outline is thinned in two halves, split at its far side.
   const [sx, sy] = out[0];
   let far = 0;
