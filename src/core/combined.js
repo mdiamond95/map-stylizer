@@ -22,6 +22,8 @@ export const COMBINED_DEFAULTS = { ...LINEWORK_DEFAULTS };
 // rgba: image pixels; returns { layers: [{ name, colour, d, count, length, show }] }.
 export function extractCombined(rgba, w, h, options = {}, onProgress) {
   const o = { ...COMBINED_DEFAULTS, ...options };
+  // With debug on, each method's own lines come back too, for comparing them.
+  const dbg = o.debug ? {} : null;
   const out = o.outScale;
   const n = w * h;
   const k = Math.max(w, h) / 3000;
@@ -98,7 +100,22 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
   }
   // Grow each block back over half its outline, and smooth off the bumps.
   let blockMask = open(dilate(blocks, w, h, 1), w, h, r(2));
-  const shapes = blockOutlines(blockMask, w, h, 150 * k * k);
+  // Hill shading and tree drawings enclose patches of paper too. A patch
+  // is dropped when two separate tests agree it isn't a block: it sits in
+  // hatching (many short arcs scattered in every direction, unlike lettering,
+  // which runs in a row, or dashes, which are straight) and its outline is
+  // jagged, many short turns instead of a few straight sides.
+  const { texture, longInk } = hatching(ink, w, h, k);
+  const shapes = [];
+  for (const p of blockOutlines(blockMask, w, h, 150 * k * k)) {
+    const t = meanAlong(p, texture, w, h), turns = turnsPer100(p);
+    if ((t > 0.3 && turns > 8) || (t > 0.1 && turns > 12)) continue;
+    // Small scribbles drawn by loose marks rather than by a long printed line.
+    if (lineLength(p) < 250 * k && turns > 10 && meanAlong(p, longInk, w, h) < 0.4) continue;
+    // A big open area can have one side running along hatching: that side is cut off.
+    shapes.push(...cutJagged(p, texture, w, h, k));
+  }
+  if (dbg) Object.assign(dbg, { texture, ink: ink.slice() });
 
   onProgress?.('Finding the streets');
   const blockNear = dilate(blockMask, w, h, 1);
@@ -186,6 +203,7 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
       }
     }
     for (const l of add) { drawLine(accepted, l, w, h); (src === 'colour' ? kept.fill : kept.edges).push(l); }
+    if (dbg) dbg['kept ' + src] = add;
   }
   // Long straight lines only one tracer found are real lines far more often
   // than lettering, which is short and twisty, when they join up with lines
@@ -198,10 +216,11 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
     return len > 25 * k && straight > 0.85 && l.filter(inMargin).length < l.length / 2 && meanAlong(l, cropNear, w, h) < 0.5 && meanAlong(l, colourNear, w, h) < 0.5;
   });
   const others = unsure.filter((l) => !unsureLeft.includes(l));
+  if (dbg) dbg['kept unsure'] = [];
   for (let round = 0; round < 2; round++) {
     const joined = dilate(accepted, w, h, r(6));
     const touches = (l) => joined[idx(l[0][0], l[0][1], w, h)] || joined[idx(l[l.length - 1][0], l[l.length - 1][1], w, h)];
-    unsureLeft = unsureLeft.filter((l) => { if (!touches(l)) return true; kept.edges.push(l); drawLine(accepted, l, w, h); return false; });
+    unsureLeft = unsureLeft.filter((l) => { if (!touches(l)) return true; kept.edges.push(l); dbg?.['kept unsure']?.push(l); drawLine(accepted, l, w, h); return false; });
   }
   unsureLeft = unsureLeft.concat(others);
   const gaps = closeGaps(kept.edges, 10 * k);
@@ -258,7 +277,8 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
   layers.push(layer('Dashed lines', main?.colour || '#2b2f3a', dashed));
   layers.push(layer('Street centres', '#b07a2a', centres, false));
   layers.push(layer('Unsure lines', '#e07b00', unsureLeft, false));
-  return { layers: layers.filter((l) => l.count) };
+  if (dbg) Object.assign(dbg, { shapes, plain: plainLines, masked: maskedLines, fillEdges, gaps, inferred: filled.inferred });
+  return { layers: layers.filter((l) => l.count), debug: dbg };
 }
 
 // ---------- colour ----------
@@ -722,6 +742,100 @@ function edgeLines(fill, crop, w, h) {
   for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) { const i = y * w + x; if (fill[i] && !inner[i] && !crop[i]) edge[i] = 1; }
   thin(edge, w, h);
   return prune(traceSkeleton(edge, w, h), 4, 12).map((l) => simplify(l, 1.2)).filter((l) => lineLength(l) > 10);
+}
+
+// ---------- hill shading ----------
+
+// Hatching is drawn as short arcs, wider than tall, scattered over an area.
+// Each such mark with at least 8 others round it, spread in both directions
+// rather than along a line, marks a disc of hatching.
+export function hatching(ink, w, h, k) {
+  // Tuned on the 3,500-pixel Halifax scan.
+  k *= 3000 / 3500;
+  const c = components(ink, w, h, true);
+  const n = c.count + 1;
+  const sx = new Float64Array(n), sy = new Float64Array(n), sxx = new Float64Array(n), syy = new Float64Array(n), sxy = new Float64Array(n);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const l = c.label[y * w + x];
+    if (!l) continue;
+    sx[l] += x; sy[l] += y; sxx[l] += x * x; syy[l] += y * y; sxy[l] += x * y;
+  }
+  // Ink that is part of a long printed line (a street edge, a shore).
+  const longInk = new Uint8Array(w * h);
+  for (let i = 0; i < w * h; i++) { const l = c.label[i]; if (l && Math.max(c.x1[l] - c.x0[l], c.y1[l] - c.y0[l]) + 1 >= 150 * k) longInk[i] = 1; }
+  // Loose marks: small, wider than tall. Sure marks also bend (a dash is a
+  // straight bar; an arc's pixels spread across its length as well as
+  // along it) and aren't tiny.
+  const marks = [], sure = [];
+  for (let l = 1; l < n; l++) {
+    const a = c.area[l], bw = c.x1[l] - c.x0[l] + 1, bh = c.y1[l] - c.y0[l] + 1;
+    if (Math.max(bw, bh) < 4 * k || Math.max(bw, bh) >= 45 * k || a < 6 * k * k || bw / bh <= 1.3 || bh > 9 * k || a / (bw * bh) >= 0.7) continue;
+    const mx = sx[l] / a, my = sy[l] / a;
+    const [lo] = eigen2(sxx[l] / a - mx * mx, syy[l] / a - my * my, sxy[l] / a - mx * my);
+    marks.push([mx, my]);
+    sure.push(lo > 0.5 * k * k && Math.max(bw, bh) >= 7 * k);
+  }
+  const R = 40 * k, cell = Math.ceil(R), gw = Math.ceil(w / cell) + 1;
+  const grid = new Map();
+  marks.forEach(([x, y], i) => { const key = Math.floor(y / cell) * gw + Math.floor(x / cell); if (!grid.has(key)) grid.set(key, []); grid.get(key).push(i); });
+  const out = new Uint8Array(w * h), disc = 26 * k;
+  marks.forEach(([x, y], i) => {
+    if (!sure[i]) return;
+    const near = [];
+    let sureNear = 0;
+    const cx = Math.floor(x / cell), cy = Math.floor(y / cell);
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) for (const j of grid.get((cy + dy) * gw + cx + dx) || []) {
+      if (Math.hypot(marks[j][0] - x, marks[j][1] - y) <= R) { near.push(marks[j]); if (sure[j]) sureNear++; }
+    }
+    if (near.length < 8 || sureNear < 4) return;
+    let mx = 0, my = 0;
+    for (const [px, py] of near) { mx += px; my += py; }
+    mx /= near.length; my /= near.length;
+    let vx = 0, vy = 0, cv = 0;
+    for (const [px, py] of near) { vx += (px - mx) ** 2; vy += (py - my) ** 2; cv += (px - mx) * (py - my); }
+    const [lo, hi] = eigen2(vx, vy, cv);
+    if (lo / (hi || 1) <= 0.25) return;
+    for (let yy = Math.max(0, Math.floor(y - disc)); yy <= Math.min(h - 1, y + disc); yy++) for (let xx = Math.max(0, Math.floor(x - disc)); xx <= Math.min(w - 1, x + disc); xx++) {
+      if ((xx - x) ** 2 + (yy - y) ** 2 <= disc * disc) out[yy * w + xx] = 1;
+    }
+  });
+  return { texture: out, longInk: dilate(longInk, w, h, 2) };
+}
+
+// Splits an outline where it zigzags through hatching (corners closer than
+// 8 px apart on average over 40 px), keeping the rest as open lines.
+function cutJagged(p, texture, w, h, k) {
+  const n = p.length, along = [0];
+  for (let i = 1; i < n; i++) along.push(along[i - 1] + Math.hypot(p[i][0] - p[i - 1][0], p[i][1] - p[i - 1][1]));
+  const bad = p.map(([x, y], i) => {
+    if (!texture[idx(x, y, w, h)]) return false;
+    let m = 0;
+    for (let j = 0; j < n; j++) if (Math.abs(along[j] - along[i]) <= 20 * k) m++;
+    return m >= 5;
+  });
+  if (!bad.some(Boolean)) return [p];
+  const out = [];
+  let run = [];
+  for (let i = 0; i < n; i++) {
+    if (bad[i]) { if (run.length > 1) out.push(run); run = []; } else run.push(p[i]);
+  }
+  if (run.length > 1) out.push(run);
+  // The outline is closed: join the last run onto the first.
+  if (!bad[0] && !bad[n - 1] && out.length > 1) { const last = out.pop(); out[0] = last.concat(out[0].slice(1)); }
+  return out.filter((l) => lineLength(l) > 10 * k);
+}
+
+// Eigenvalues of [[a, c], [c, b]], smaller first.
+function eigen2(a, b, c) {
+  const m = (a + b) / 2, d = Math.sqrt(Math.max(0, ((a - b) / 2) ** 2 + c * c));
+  return [m - d, m + d];
+}
+
+// Corners per 100 px of outline: a few for a block, dozens for a scribble.
+function turnsPer100(p) {
+  let len = 0;
+  for (let i = 1; i < p.length; i++) len += Math.hypot(p[i][0] - p[i - 1][0], p[i][1] - p[i - 1][1]);
+  return (p.length / (len || 1)) * 100;
 }
 
 // ---------- railways and dashes ----------
