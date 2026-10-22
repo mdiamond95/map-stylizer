@@ -13,11 +13,16 @@
 // route, a block missing a side) are filled in where the ink backs it up, as
 // a layer of their own to check.
 import { makeInkImage } from './match.js';
+import { measureYardsticks } from './measure.js';
 import { inferLines } from './infer.js';
 import { LINEWORK_DEFAULTS, extractLinework, thin, traceSkeleton, prune, simplify, colourName, toPath, lineLength } from './linework.js';
 
-// Sizes below are tuned on a 3,000-pixel-wide city map and scaled from there.
-export const COMBINED_DEFAULTS = { ...LINEWORK_DEFAULTS };
+// Sizes below are tuned on a city map (Halifax, 1940s, a 3,500-pixel scan
+// whose lines are 1.6 pixels thick) and scaled from there by each map's own
+// line weight: k is 1 for lines LINE_WEIGHT_PER_K pixels thick. `scale` sets
+// k by hand instead.
+export const COMBINED_DEFAULTS = { ...LINEWORK_DEFAULTS, scale: 0 };
+const LINE_WEIGHT_PER_K = 1.6 / (3500 / 3000);
 
 // rgba: image pixels; returns { layers: [{ name, colour, d, count, length, show }] }.
 export function extractCombined(rgba, w, h, options = {}, onProgress) {
@@ -26,8 +31,6 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
   const dbg = o.debug ? {} : null;
   const out = o.outScale;
   const n = w * h;
-  const k = Math.max(w, h) / 3000;
-  const r = (px) => Math.max(1, Math.round(px * k));
 
   onProgress?.('Reading colours');
   const inkImg = makeInkImage(rgba, w, h);
@@ -48,6 +51,13 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
     if (other && (dark[i] || L[i] < 75)) colourInk[i] = 1;
     else if (dark[i]) ink[i] = 1;
   }
+  // Every size below was tuned on a city map with lines 1.6 pixels thick
+  // (a 3,500-pixel scan) and is scaled by this map's own line weight, so a
+  // bigger scan or a boldly drawn map gets the same treatment. Without a
+  // clear line weight, sizes go by the image size instead.
+  const yard = measureYardsticks(inkImg.gray, (i) => { const x = i % w; return paperAt(inkImg, x, (i - x) / w); }, ink, ink.map((v) => 1 - v), w, h);
+  const k = o.scale || (yard.sure ? Math.min(8, Math.max(0.3, yard.lineWeight / LINE_WEIGHT_PER_K)) : Math.max(w, h) / 3000);
+  const r = (px) => Math.max(1, Math.round(px * k));
   // Coloured fills: large areas a different colour from the paper that aren't ink.
   // Only a light opening, so the narrow water between piers stays; grid lines
   // printed over the water and lettering in it are filled back in.
@@ -149,7 +159,12 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
   let space = new Uint8Array(n);
   for (let i = 0; i < n; i++) space[i] = (streets[i] || ink[i]) && !blockNear[i] ? 1 : 0;
   space = close(space, w, h, r(3));
-  for (let i = 0; i < n; i++) if (blockNear[i] || fill[i] || crop[i]) space[i] = 0;
+  // Open ground (a park, a common, the paper round the map) isn't street:
+  // paper far from any line, and the paper round it, is left out.
+  const deep = new Uint8Array(n);
+  for (let i = 0; i < n; i++) if (depth[i] > 25 * k) deep[i] = 1;
+  const openGround = dilate(deep, w, h, r(25));
+  for (let i = 0; i < n; i++) if (blockNear[i] || fill[i] || crop[i] || openGround[i]) space[i] = 0;
   fillHoles(space, w, h, 400 * k * k);
   space = open(space, w, h, 1);
   // Lettering inside a street, away from its edges, is painted out with the
@@ -160,9 +175,9 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
     const i = y * w + x;
     if ((ink[i] || colourInk[i]) && spaceDepth[i] > 2.5 * k + 0.5) { const p = paperAt(inkImg, x, y); painted[i * 4] = painted[i * 4 + 1] = painted[i * 4 + 2] = p; }
   }
-  const centres = streetCentres(space, w, h);
+  const centres = streetCentres(space, w, h, k);
 
-  const sub = { ...o, outScale: 1, keepLines: true };
+  const sub = { ...o, outScale: 1, keepLines: true, unit: 3000 * k, lineWeight: yard.lineWeight };
   onProgress?.('Tracing the ink');
   const plain = extractLinework(rgba, w, h, sub);
   onProgress?.('Tracing without street names');
@@ -321,7 +336,7 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
   layers.push(layer('Street centres', '#b07a2a', centres, false));
   layers.push(layer('Unsure lines', '#e07b00', unsureLeft, false));
   if (dbg) Object.assign(dbg, { shapes, plain: plainLines, masked: maskedLines, fillEdges, gaps, inferred: filled.inferred });
-  return { layers: layers.filter((l) => l.count), debug: dbg };
+  return { layers: layers.filter((l) => l.count), debug: dbg, yard: { ...yard, k } };
 }
 
 // ---------- colour ----------
@@ -750,10 +765,10 @@ function fillPolygon(pts, x0, y0, w, h) {
 }
 
 // One line down the middle of each street.
-function streetCentres(space, w, h) {
+function streetCentres(space, w, h, k) {
   const m = space.slice();
   thin(m, w, h);
-  const unit = Math.max(w, h);
+  const unit = 3000 * k;
   return prune(traceSkeleton(m, w, h), unit * 0.005, unit * 0.012).map((l) => simplify(l, 1.2)).filter((l) => lineLength(l) > unit * 0.004);
 }
 

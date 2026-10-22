@@ -27,15 +27,17 @@ export function extractLinework(rgba, width, height, options = {}, onProgress) {
     }
   }
   onProgress?.('Removing lettering');
-  const textSize = Math.max(8, o.minSize * Math.max(width, height));
+  // Sizes go by the image size unless the caller measured the map (unit: the
+  // image width the sizes were tuned for, scaled to this map's lines).
+  const unit = o.unit || Math.max(width, height);
+  const textSize = Math.max(8, o.minSize * unit);
   // A stretch of line cut off by the lettering removed around it is still
   // line, however short.
-  const lineInk = o.peel ? peelLettering(mask, width, height, Math.max(14, textSize * 0.7), textSize) : null;
+  const lineInk = o.peel ? peelLettering(mask, width, height, Math.max(14, textSize * 0.7), textSize, null, o.lineWeight ? Math.max(6, 3.5 * o.lineWeight) : 6) : null;
   dropSmallPieces(mask, width, height, textSize, lineInk);
   onProgress?.('Thinning lines');
   thin(mask, width, height);
   onProgress?.('Tracing lines');
-  const unit = Math.max(width, height);
   const sk = traceSkeleton(mask, width, height);
   const lines = prune(sk, unit * 0.005, unit * 0.012)
     .map((l) => (o.straighten ? straighten(l, o.simplify, textSize) : simplify(l, o.simplify)))
@@ -97,10 +99,10 @@ function dropSmallPieces(mask, w, h, size, keep = null) {
 // and touches a line is lettering when it is letter-sized or encloses the
 // small holes words have; a thin bridge between two bits of line, or a long
 // curve (a wiggly coast), stays. Returns the line ink.
-export function peelLettering(mask, w, h, runLen, textSize, debug) {
+export function peelLettering(mask, w, h, runLen, textSize, debug, maxThick = 6) {
   const thickV = runsAcross(mask, w, h, 0, 1), thickH = runsAcross(mask, w, h, 1, 0);
   const onLine = new Uint8Array(w * h);
-  const maxThick = 6, D = 32;
+  const D = 32;
   // Ink pixels listed column by column and row by row, so each direction
   // only visits ink, in order along its lines.
   let nInk = 0;
