@@ -22,6 +22,8 @@ export const COMBINED_DEFAULTS = { ...LINEWORK_DEFAULTS };
 // rgba: image pixels; returns { layers: [{ name, colour, d, count, length, show }] }.
 export function extractCombined(rgba, w, h, options = {}, onProgress) {
   const o = { ...COMBINED_DEFAULTS, ...options };
+  // With debug on, each method's own lines come back too, for comparing them.
+  const dbg = o.debug ? {} : null;
   const out = o.outScale;
   const n = w * h;
   const k = Math.max(w, h) / 3000;
@@ -71,6 +73,28 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
   const closed = close(fill, w, h, r(5));
   for (let i = 0; i < n; i++) if (closed[i] && ink[i]) fill[i] = 1;
   fill = open(fill, w, h, 1);
+  // Pictures on the water (ships, sailboats, the compass rose) are drawings,
+  // not map. Ships are mostly ink and already count as water; a sailboat's
+  // paper sails leave a hole in the water with lines drawn inside it, which
+  // an island doesn't have.
+  sailsToWater(fill, ink, w, h, k);
+  // Thin lines drawn out on the water (the compass rose, rigging) are water
+  // too: anything dry there narrower than a pier.
+  {
+    const dry = new Uint8Array(n);
+    for (let i = 0; i < n; i++) dry[i] = fill[i] ? 0 : 1;
+    // Piers are narrow too, but they're joined to the land.
+    const land = open(dry, w, h, 2), landNear = dilate(land, w, h, 2);
+    const wet = dilate(fill, w, h, 3);
+    const thin = new Uint8Array(n);
+    for (let i = 0; i < n; i++) if (dry[i] && !land[i] && wet[i]) thin[i] = 1;
+    const tc = components(thin, w, h, true);
+    const joined = new Uint8Array(tc.count + 1);
+    for (let i = 0; i < n; i++) if (tc.label[i] && landNear[i] && hasLandNeighbour(land, i, w, h)) joined[tc.label[i]] = 1;
+    for (let i = 0; i < n; i++) if (tc.label[i] && !joined[tc.label[i]]) fill[i] = 1;
+  }
+  // Lines well out on the water belong to such pictures.
+  const deepWater = erode(fill, w, h, r(3));
 
   onProgress?.('Finding blocks');
   const inkWide = dilate(ink, w, h, 1);
@@ -91,6 +115,11 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
     if (maxw[l] < 6 * k || a > 0.02 * n || a / (bw * bh) < 0.3) kind[l] = 2;
     else if (a >= 150 * k * k) kind[l] = 1;
   }
+  // The map's border and the framed boxes on it (the title, legends) are
+  // found from their long straight sides; nothing in them is map.
+  const frame = framesAndBoxes(ink, w, h, k, (i) => kind[pc.label[i]] === 1);
+  for (let i = 0; i < n; i++) if (frame.crop[i]) crop[i] = 1;
+  if (dbg) dbg.boxes = frame.boxes.map(([x0, y0, x1, y1]) => [[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]]);
   for (let i = 0; i < n; i++) {
     if (crop[i]) continue;
     const t = kind[pc.label[i]];
@@ -98,7 +127,22 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
   }
   // Grow each block back over half its outline, and smooth off the bumps.
   let blockMask = open(dilate(blocks, w, h, 1), w, h, r(2));
-  const shapes = blockOutlines(blockMask, w, h, 150 * k * k);
+  // Hill shading and tree drawings enclose patches of paper too. A patch
+  // is dropped when two separate tests agree it isn't a block: it sits in
+  // hatching (many short arcs scattered in every direction, unlike lettering,
+  // which runs in a row, or dashes, which are straight) and its outline is
+  // jagged, many short turns instead of a few straight sides.
+  const { texture, longInk } = hatching(ink, w, h, k);
+  const shapes = [];
+  for (const p of blockOutlines(blockMask, w, h, 150 * k * k)) {
+    const t = meanAlong(p, texture, w, h), turns = turnsPer100(p);
+    if ((t > 0.3 && turns > 8) || (t > 0.1 && turns > 12)) continue;
+    // Small scribbles drawn by loose marks rather than by a long printed line.
+    if (lineLength(p) < 250 * k && turns > 10 && meanAlong(p, longInk, w, h) < 0.4) continue;
+    // A big open area can have one side running along hatching: that side is cut off.
+    shapes.push(...cutJagged(p, texture, w, h, k));
+  }
+  if (dbg) Object.assign(dbg, { texture, ink: ink.slice(), fill: fill.slice(), colourInk });
 
   onProgress?.('Finding the streets');
   const blockNear = dilate(blockMask, w, h, 1);
@@ -149,7 +193,8 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
   const railBand = dilate(rasterise(rails, w, h), w, h, R + r(3));
   const piece = 8 * k, longRun = 60 * k;
   const accepted = new Uint8Array(n);
-  const kept = { edges: [], fill: [] }, unsure = [];
+  const kept = { edges: [], fill: [] };
+  let unsure = [];
   // Most trustworthy geometry first; later sources only fill in what is left.
   const sources = [['shape', shapes], ['colour', fillEdges], ['masked', maskedLines], ['plain', plainLines]];
   const doubted = new Uint8Array(n);
@@ -167,7 +212,7 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
         if (p < pieces) {
           const pts = samplePath(line, p * total / pieces, (p + 1) * total / pieces, 2);
           const frac = (m) => pts.reduce((s, [x, y]) => s + m[idx(x, y, w, h)], 0) / pts.length;
-          if (frac(crop) > 0.5 || frac(near) >= 0.6 || frac(railBand) >= 0.6) { keep = false; }
+          if (frac(crop) > 0.5 || frac(near) >= 0.6 || frac(railBand) >= 0.6 || frac(deepWater) >= 0.6) { keep = false; }
           else {
             const vInk = ((frac(support.plain) >= 0.6) + (frac(support.masked) >= 0.6)) / 2;
             const vShape = frac(support.shape) >= 0.6 ? 1 : 0, vColour = frac(support.colour) >= 0.6 ? 1 : 0;
@@ -186,22 +231,25 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
       }
     }
     for (const l of add) { drawLine(accepted, l, w, h); (src === 'colour' ? kept.fill : kept.edges).push(l); }
+    if (dbg) dbg['kept ' + src] = add;
   }
   // Long straight lines only one tracer found are real lines far more often
   // than lettering, which is short and twisty, when they join up with lines
   // already kept (hillside hatching doesn't). Twice, so a road can grow out
   // along a chain of them. Not in the margin (the map's frame), round boxes
   // of print or along grid lines.
+  unsure = unsure.filter((l) => meanAlong(l, deepWater, w, h) < 0.6);
   let unsureLeft = unsure.filter((l) => {
     const len = lineLength(l);
     const straight = Math.hypot(l[l.length - 1][0] - l[0][0], l[l.length - 1][1] - l[0][1]) / (len || 1);
     return len > 25 * k && straight > 0.85 && l.filter(inMargin).length < l.length / 2 && meanAlong(l, cropNear, w, h) < 0.5 && meanAlong(l, colourNear, w, h) < 0.5;
   });
   const others = unsure.filter((l) => !unsureLeft.includes(l));
+  if (dbg) dbg['kept unsure'] = [];
   for (let round = 0; round < 2; round++) {
     const joined = dilate(accepted, w, h, r(6));
     const touches = (l) => joined[idx(l[0][0], l[0][1], w, h)] || joined[idx(l[l.length - 1][0], l[l.length - 1][1], w, h)];
-    unsureLeft = unsureLeft.filter((l) => { if (!touches(l)) return true; kept.edges.push(l); drawLine(accepted, l, w, h); return false; });
+    unsureLeft = unsureLeft.filter((l) => { if (!touches(l)) return true; kept.edges.push(l); dbg?.['kept unsure']?.push(l); drawLine(accepted, l, w, h); return false; });
   }
   unsureLeft = unsureLeft.concat(others);
   const gaps = closeGaps(kept.edges, 10 * k);
@@ -210,11 +258,35 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
   const even = evenOut([kept.edges.concat(gaps)], spaceDepth, centres, w, h, k);
   unsureLeft = unsureLeft.concat(even.dropped);
 
+  // Lines in a second ink colour: the reference grid printed over the map,
+  // dead straight lines from edge to edge, found by methods that must agree
+  // and drawn exactly straight, shown where the map shows it (not across the
+  // title and legend boxes).
+  const grid = gridLines(colourInk, w, h, k, frame.neat);
+  const gridShown = grid.flatMap((l) => splitOff(l, crop, w, h, 20 * k));
+  const gridBand = dilate(rasterise(grid, w, h), w, h, r(4));
+  // Tram routes: the coloured ink left once the grid is out, with the
+  // route-number badges and arrows closed into the line so one joined line
+  // runs through them, across the gaps where a street crosses.
+  const routes = routeLines(colourInk, A, B, gridBand, crop, deepWater, w, h, k).map((l) => trimHooks(flattenBumps(l, even.width), even.width));
+  const stretches = routeSides(routes, strongInk(inkImg, ink, w, h), even.groups[0].concat(kept.fill), even.width, w, h, k);
+
   onProgress?.('Filling in missing lines');
   // Not along railways or dashed lines, which have layers of their own.
   const avoid = dilate(rasterise(rails.concat(dashed), w, h), w, h, R + r(3));
-  const filled = fillIn({ inkImg, ink, colourInk, fill, crop, blockMask, avoid, edges: even.groups[0], shore: kept.fill, w, h, k });
+  const filled = fillIn({ inkImg, ink, colourInk, gridBand, hints: sideLines(stretches), fill, crop, blockMask, avoid, edges: even.groups[0], shore: kept.fill, w, h, k });
   unsureLeft = unsureLeft.concat(filled.creases);
+
+  // The street edges the routes hide.
+  const under = routeEdges({ stretches, strong: filled.strong, blocks: filled.blocks, edges: filled.edges, known: filled.edges.concat(filled.inferred, kept.fill), w, h, k });
+  filled.edges = under.edges;
+  filled.inferred.push(...under.lines);
+  // Dashed street edges traced as solid go to the dashed lines.
+  const dashRuns = dashedRuns(filled.edges, inkImg, w, h, k);
+  filled.edges = dashRuns.solid;
+  dashed.push(...dashRuns.dashed);
+  if (dbg) dbg['dashed runs'] = dashRuns.dashed;
+  if (dbg) Object.assign(dbg, { 'route edges': under.lines, 'route junk': under.junk, 'route sides': sideLines(stretches), routes, strong: filled.strong, blocks: filled.blocks, 'known': filled.edges.concat(filled.inferred, kept.fill), streetWidth: new Float32Array([even.width]) });
 
   onProgress?.('Sorting layers');
   const scaled = (ls) => ls.filter((l) => l.length > 1).map((l) => l.map(([x, y]) => [x * out, y * out]));
@@ -224,6 +296,10 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
   };
   const main = plain.layers[0];
   const layers = [layer('Street and block edges', main?.colour || '#2b2f3a', filled.edges)];
+  if (frame.neat) {
+    const [x0, y0, x1, y1] = frame.neat;
+    layers.push({ ...layer('Map border', main?.colour || '#2b2f3a', [[[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]]]), show: false });
+  }
   // Filled-in lines are guesses, so they get a colour of their own to check
   // them by; recolour the layer to match once happy.
   layers.push(layer('Filled-in lines', '#8a3ffc', filled.inferred));
@@ -238,27 +314,14 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
     const areas = layer(water ? 'Water' : `${colourName(c)} areas`, hex(c), fillRings(fill, w, h, 1500 * k * k));
     if (areas.count) layers.unshift({ ...areas, area: true });
   }
-  // Lines in a second ink colour (a red grid, tram routes) pass through as
-  // their own layers, one per colour.
-  const byColour = new Map();
-  for (const l of plain.lines.filter(isColour)) {
-    const c = inkColourAlong(l, rgba, colourInk, w, h);
-    const name = `${colourName(c).replace(/^Dark (.)/, (_, ch) => ch.toUpperCase())} lines`;
-    if (!byColour.has(name)) byColour.set(name, { lines: [], sum: [0, 0, 0], n: 0 });
-    const g = byColour.get(name);
-    g.lines.push(l); g.sum = g.sum.map((v, i) => v + c[i]); g.n++;
-  }
-  // Scraps of colour (a symbol, the edge of the water) aren't worth a layer.
-  const edgeLength = layers[0].length / out;
-  for (const [name, g] of [...byColour].sort((a, b) => b[1].lines.length - a[1].lines.length)) {
-    if (g.lines.reduce((t, l) => t + lineLength(l), 0) < edgeLength * 0.02) continue;
-    layers.push(layer(name, hex(g.sum.map((v) => v / g.n)), g.lines));
-  }
+  if (gridShown.length) layers.push(layer('Grid lines', hex(inkColourAlong(grid[0], rgba, colourInk, w, h)), gridShown));
+  if (routes.length) layers.push(layer('Tram routes', hex(inkColourAlong(routes[0], rgba, colourInk, w, h)), routes));
   layers.push(layer('Railways', main?.colour || '#2b2f3a', rails.concat(closeGaps(rails, 30 * k))));
   layers.push(layer('Dashed lines', main?.colour || '#2b2f3a', dashed));
   layers.push(layer('Street centres', '#b07a2a', centres, false));
   layers.push(layer('Unsure lines', '#e07b00', unsureLeft, false));
-  return { layers: layers.filter((l) => l.count) };
+  if (dbg) Object.assign(dbg, { shapes, plain: plainLines, masked: maskedLines, fillEdges, gaps, inferred: filled.inferred });
+  return { layers: layers.filter((l) => l.count), debug: dbg };
 }
 
 // ---------- colour ----------
@@ -724,6 +787,500 @@ function edgeLines(fill, crop, w, h) {
   return prune(traceSkeleton(edge, w, h), 4, 12).map((l) => simplify(l, 1.2)).filter((l) => lineLength(l) > 10);
 }
 
+// ---------- reference grid ----------
+
+// Two ways to find the grid: (a) long runs of coloured ink lined up along
+// one row or column, (b) a vote over every near-level and near-upright line
+// position and angle (a Hough transform). A grid line is kept where both
+// put one, then fitted through the coloured ink along it.
+export function gridLines(colour, w, h, k, neat) {
+  const out = [];
+  for (const across of [true, false]) {
+    const [len, size] = across ? [w, h] : [h, w];
+    const at = across ? (a, b) => colour[b * w + a] : (a, b) => colour[a * w + b];
+    // (a) Hough votes for lines within 2 degrees of level/upright.
+    const angles = [];
+    for (let t = -2; t <= 2.0001; t += 0.1) angles.push(t * Math.PI / 180);
+    const acc = angles.map(() => new Float32Array(size + 200));
+    for (let a = 0; a < len; a += 2) for (let b = 0; b < size; b++) {
+      if (!at(a, b)) continue;
+      angles.forEach((t, j) => { const rho = Math.round(b - (a - len / 2) * Math.tan(t)) + 100; if (rho >= 0 && rho < size + 200) acc[j][rho] += 2; });
+    }
+    const cand = [];
+    acc.forEach((row, j) => {
+      for (let i = 1; i < row.length - 1; i++) if (row[i] >= 0.08 * len && row[i] >= row[i - 1] && row[i] >= row[i + 1]) cand.push({ pos: i - 100, t: angles[j], votes: row[i] });
+    });
+    cand.sort((p, q) => q.votes - p.votes);
+    const peaks = [];
+    for (const c of cand) if (!peaks.some((p) => Math.abs(p.pos - c.pos) <= 20 * k)) peaks.push(c);
+    // (b) Long straight runs of coloured ink (gaps where a street crosses
+    // are bridged) lying along the line over at least half the sheet; a tram
+    // route turns corners and doesn't.
+    const runs = straightRuns(colour, w, h, Math.round(60 * k), across, Math.round(14 * k)).filter((s) => s[3] <= 8 * k + 3);
+    const lined = peaks.filter((p) => {
+      let lo = len, hi = 0, cover = 0;
+      for (const [a0, a1, mid] of runs) {
+        const am = (a0 + a1) / 2, c = p.pos + (am - len / 2) * Math.tan(p.t);
+        if (Math.abs(mid - c) > 4 * k) continue;
+        cover += a1 - a0; lo = Math.min(lo, a0); hi = Math.max(hi, a1);
+      }
+      return cover > 0.12 * len && hi - lo > 0.2 * len;
+    });
+    // (c) Grid lines are evenly spaced. The spacing comes from lines both
+    // (a) and (b) are sure of; a line is kept when two of the three agree.
+    const voted = (p) => p.votes >= 0.25 * len;
+    const sure = peaks.filter((p) => voted(p) && lined.includes(p)).map((p) => p.pos).sort((p, q) => p - q);
+    const gaps = [];
+    for (let i = 1; i < sure.length; i++) gaps.push(sure[i] - sure[i - 1]);
+    let step = 0, best = 0;
+    for (const g of gaps) { const m = gaps.filter((q) => Math.abs(q / g - Math.round(q / g)) * g <= 10 * k).length; if (m > best && g > 50 * k) { best = m; step = g; } }
+    const even = (p) => step > 0 && sure.length >= 2 && sure.some((q) => Math.abs(q - p.pos) > step / 2 && Math.abs(Math.abs(q - p.pos) / step - Math.round(Math.abs(q - p.pos) / step)) * step <= 8 * k);
+    const fits = [];
+    const nearBorder = (pos) => neat && (across ? pos < neat[1] + 15 * k || pos > neat[3] - 15 * k : pos < neat[0] + 15 * k || pos > neat[2] - 15 * k);
+    for (const b of peaks) {
+      if (voted(b) + lined.includes(b) + even(b) < 2 || nearBorder(b.pos)) continue;
+      // Fit position and slope through the coloured ink near the agreed line.
+      let sa = 0, sb = 0, saa = 0, sab = 0, m = 0, lo = len, hi = 0;
+      for (let a = 0; a < len; a++) {
+        const centre = b.pos + (a - len / 2) * Math.tan(b.t);
+        for (let d = -Math.round(5 * k); d <= Math.round(5 * k); d++) {
+          const bb = Math.round(centre + d);
+          if (bb < 0 || bb >= size || !at(a, bb)) continue;
+          sa += a; sb += bb; saa += a * a; sab += a * bb; m++; lo = Math.min(lo, a); hi = Math.max(hi, a);
+        }
+      }
+      if (m < 10) continue;
+      const slope = (m * sab - sa * sb) / (m * saa - sa * sa || 1), icpt = (sb - slope * sa) / m;
+      fits.push({ slope, icpt, lo, hi });
+    }
+    // All grid lines run (nearly) the same way: drop any at odds with the rest.
+    const slopes = fits.map((f) => f.slope).sort((p, q) => p - q), mid = slopes[Math.floor(slopes.length / 2)];
+    for (const { slope, icpt, lo, hi } of fits) {
+      if (Math.abs(slope - mid) > 0.006) continue;
+      // Run it across the map inside the border, or over the ink it covers.
+      const a0 = neat ? (across ? neat[0] : neat[1]) : lo, a1 = neat ? (across ? neat[2] : neat[3]) : hi;
+      const p0 = [a0, icpt + slope * a0], p1 = [a1, icpt + slope * a1];
+      out.push(across ? [p0, p1] : [[p0[1], p0[0]], [p1[1], p1[0]]]);
+    }
+  }
+  return out;
+}
+
+// Dashed street edges the tracers followed as if solid. Each line is split
+// into straight runs, and each run's ink is read along it: a dashed line
+// dips to paper briefly and evenly (short gaps between ink at least as
+// long), where a solid line stays dark, and a line just off its ink fades
+// for long stretches instead. A run is taken as dashed when it dips like
+// that and either does so many times, evenly, or has another such run close
+// by (dashed streets come in families; a lettering stroke that happens to
+// dip is usually alone). Dashed runs leave the line as straight lines of
+// their own. Returns { solid, dashed }.
+function dashedRuns(lines, img, w, h, k) {
+  const dark = (x, y) => { const i = idx(x, y, w, h), xi = i % w; return 1 - img.gray[i] / Math.max(1, paperAt(img, xi, (i - xi) / w)); };
+  const runsOf = (l) => {
+    const out = [];
+    let from = 0;
+    for (let i = 1; i < l.length - 1; i++) if (bend(l[i - 1], l[i], l[i + 1]) > Math.PI / 6) { out.push([from, i]); from = i; }
+    out.push([from, l.length - 1]);
+    return out;
+  };
+  const dips = (a, b) => {
+    const len = Math.hypot(b[0] - a[0], b[1] - a[1]), ux = (b[0] - a[0]) / len, uy = (b[1] - a[1]) / len;
+    let best = null, bestMean = -1;
+    for (let off = -3; off <= 3; off += 0.5) {
+      const prof = [];
+      for (let t = 0; t <= len; t++) {
+        let m = 0;
+        for (let o = off - 1; o <= off + 1; o += 0.5) m = Math.max(m, dark(a[0] + ux * t - uy * o, a[1] + uy * t + ux * o));
+        prof.push(m);
+      }
+      const mean = prof.reduce((s, v) => s + v, 0) / prof.length;
+      if (mean > bestMean) { bestMean = mean; best = prof; }
+    }
+    const runs = [];
+    for (let i = 0; i < best.length; ) { let j = i; const on = best[i] > 0.25; while (j < best.length && (best[j] > 0.25) === on) j++; runs.push([on, i, j]); i = j; }
+    const at = [];
+    for (let q = 1; q < runs.length - 1; q++) { const [on, i, j] = runs[q]; if (!on && j - i <= 5 && runs[q - 1][2] - runs[q - 1][1] >= 3 && runs[q + 1][2] - runs[q + 1][1] >= 3) at.push((i + j) / 2); }
+    const gaps = at.slice(1).map((v, i) => v - at[i]), mean = gaps.reduce((s, v) => s + v, 0) / (gaps.length || 1);
+    const spread = gaps.length > 1 ? Math.sqrt(gaps.reduce((s, v) => s + (v - mean) ** 2, 0) / gaps.length) / mean : 9;
+    return { count: at.length, per100: (100 * at.length) / len, spread };
+  };
+  const cand = [];
+  lines.forEach((l, li) => {
+    for (const [i, j] of runsOf(l)) {
+      const a = l[i], b = l[j];
+      if (Math.hypot(b[0] - a[0], b[1] - a[1]) < 25 * k) continue;
+      const d = dips(a, b);
+      if (d.count >= 2 && d.per100 >= 3.5 && (d.count < 3 || d.spread < 0.5)) cand.push({ li, i, j, mid: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], ends: [a, b], strong: d.count >= 4 && d.spread < 0.3 });
+    }
+  });
+  const near = (p, q) => q.ends.some((e) => p.ends.some((f) => Math.hypot(e[0] - f[0], e[1] - f[1]) < 30 * k)) || Math.hypot(p.mid[0] - q.mid[0], p.mid[1] - q.mid[1]) < 30 * k;
+  const chosen = cand.filter((p) => p.strong || cand.some((q) => q !== p && near(p, q)));
+  const cut = new Map();
+  for (const c of chosen) { if (!cut.has(c.li)) cut.set(c.li, []); cut.get(c.li).push([c.i, c.j]); }
+  const solid = [], dashed = chosen.map((c) => c.ends);
+  lines.forEach((l, li) => {
+    const cs = cut.get(li);
+    if (!cs) { solid.push(l); return; }
+    cs.sort((p, q) => p[0] - q[0]);
+    let from = 0;
+    for (const [i, j] of cs) { if (i > from) solid.push(l.slice(from, i + 1)); from = j; }
+    if (from < l.length - 1) solid.push(l.slice(from));
+  });
+  return { solid, dashed };
+}
+
+// The street edges a tram route hides. A route runs down the middle of its
+// street, so the street's edges are the route moved about half a street
+// width to either side. routeSides splits each route into straight
+// stretches and finds, for each side, how far out the edge is: where the
+// edge's ink and the lines found line up best, within reason of half a
+// street width ("sure" when they line up along a good part of it).
+function routeSides(routes, strong, known, W, w, h, k) {
+  const strongNear = dilate(strong, w, h, 1), knownNear = dilate(rasterise(known, w, h), w, h, 2), step = 2;
+  const stretches = [];
+  for (const route of routes) {
+    const runs = simplify(route, 2 * k);
+    for (let s = 1; s < runs.length; s++) {
+      const a = runs[s - 1], b = runs[s], len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      if (len < 15 * k) continue;
+      const ux = (b[0] - a[0]) / len, uy = (b[1] - a[1]) / len, ts = [];
+      for (let t = 0; t <= len; t += step) ts.push(t);
+      const st = { a, ux, uy, ts, sides: [] };
+      for (const sg of [1, -1]) {
+        const at = (t, d) => idx(a[0] + ux * t - sg * uy * d, a[1] + uy * t + sg * ux * d, w, h);
+        const count = (m, d) => ts.reduce((c, t) => c + m[at(t, d)], 0);
+        let d = W / 2, best = 0;
+        for (let dd = Math.max(2, 0.3 * W); dd <= 0.75 * W; dd += 0.5) { const c = count(strongNear, dd) + count(knownNear, dd); if (c > best) { best = c; d = dd; } }
+        const sure = best >= 0.4 * ts.length;
+        st.sides.push({ sg, at, d: sure ? d : W / 2, sure, lined: count(knownNear, d) >= 0.2 * ts.length ? 1 : 0 });
+      }
+      stretches.push(st);
+    }
+  }
+  return stretches;
+}
+
+// Where each sure side's edge would run, the whole stretch long.
+function sideLines(stretches) {
+  const out = [];
+  for (const { a, ux, uy, ts, sides } of stretches) for (const { sg, d, sure } of sides) {
+    if (!sure) continue;
+    const t1 = ts[ts.length - 1];
+    out.push([[a[0] - sg * uy * d, a[1] + sg * ux * d], [a[0] + ux * t1 - sg * uy * d, a[1] + uy * t1 + sg * ux * d]]);
+  }
+  return out;
+}
+
+// Three judges then look along each side of each stretch: the edge's ink
+// peeking out past the route, a block on the far side, and lines already
+// found lying on that offset. A stretch is drawn where two agree and no line
+// runs yet, as a straight run. Lines found in the street between a
+// stretch's two edges (scraps of the route's badges and arrows) are taken
+// out first. Returns { edges, lines, junk }.
+function routeEdges({ stretches, strong, blocks, edges, known, w, h, k }) {
+  const strongNear = dilate(strong, w, h, 1), r2 = Math.max(2, Math.round(2 * k));
+  let knownMask = rasterise(known, w, h);
+  // Scraps in the street: found lines lying between a stretch's two edges
+  // (pieces of the route's badges and arrows, or lettering).
+  const band = new Uint8Array(w * h);
+  for (const { a, ux, uy, ts, sides } of stretches) {
+    if (!sides.every((sd) => sd.sure)) continue;
+    const t1 = ts[ts.length - 1];
+    for (let o = -(sides[1].d - 1.5); o <= sides[0].d - 1.5; o += 0.5) drawLine(band, [[a[0] - uy * o, a[1] + ux * o], [a[0] + ux * t1 - uy * o, a[1] + uy * t1 + ux * o]], w, h);
+  }
+  const piece = 4 * k, kept = [], junk = [];
+  for (const line of edges) {
+    const total = lineLength(line), pieces = Math.max(1, Math.round(total / piece));
+    let start = 0, bad = null;
+    for (let p = 0; p <= pieces; p++) {
+      let isJunk = false;
+      if (p < pieces) {
+        const pts = samplePath(line, (p * total) / pieces, ((p + 1) * total) / pieces, 1);
+        isJunk = pts.reduce((c, [x, y]) => c + band[idx(x, y, w, h)], 0) >= 0.8 * pts.length;
+      }
+      if (p === pieces || isJunk !== bad) {
+        if (bad !== null && p > start) (bad ? junk : kept).push(subPath(line, (start * total) / pieces, (p * total) / pieces));
+        start = p; bad = isJunk;
+      }
+    }
+  }
+  if (junk.length) knownMask = rasterise(kept.concat(known.filter((l) => !edges.includes(l))), w, h);
+  const knownHere = dilate(knownMask, w, h, r2);
+  // Each side: the edge's ink peeking out past the route, a block on the far
+  // side, and found lines on the same offset. Drawn where two agree.
+  const lines = [];
+  for (const { a, ux, uy, ts, sides } of stretches) for (const { sg, at, d, lined } of sides) {
+    const vote = ts.map((t) => !knownHere[at(t, d)] && strongNear[at(t, d)] + (blocks[at(t, d + 4 * k)] && blocks[at(t, d + 8 * k)]) + lined >= 2);
+    for (let i = 0; i < vote.length; ) {
+      if (!vote[i]) { i++; continue; }
+      let j = i;
+      while (j + 1 < vote.length && (vote[j + 1] || (j + 2 < vote.length && vote[j + 2]))) j++;
+      if (ts[j] - ts[i] >= 6 * k) {
+        const p = (t) => [a[0] + ux * t - sg * uy * d, a[1] + uy * t + sg * ux * d];
+        lines.push([p(ts[i]), p(ts[j])]);
+      }
+      i = j + 1;
+    }
+  }
+  return { edges: kept.filter((l) => lineLength(l) > 1), lines, junk };
+}
+
+// Coloured lines other than the grid, traced as joined lines.
+function routeLines(colour, A, B, gridBand, crop, water, w, h, k) {
+  const n = w * h;
+  // Routes are printed in the grid's ink; other second-colour ink (specks
+  // of darker water) is a different hue.
+  const ga = [], gb = [];
+  for (let i = 0; i < n; i += 3) if (colour[i] && gridBand[i] && !water[i]) { ga.push(A[i]); gb.push(B[i]); }
+  const med = (v) => v.sort((x, y) => x - y)[v.length >> 1] ?? 0, gA = med(ga), gB = med(gb);
+  let m = new Uint8Array(n);
+  for (let i = 0; i < n; i++) m[i] = colour[i] && !gridBand[i] && !crop[i] && (!ga.length || Math.hypot(A[i] - gA, B[i] - gB) < 30) ? 1 : 0;
+  // Route stroke: what's left once solid symbols (red diamonds, number
+  // badges, both solid once their lettering is closed over) are taken out.
+  const stroke = m.slice(), r2 = Math.max(1, Math.round(2 * k));
+  const solid = dilate(open(close(m, w, h, r2), w, h, Math.max(2, Math.round(4 * k))), w, h, r2);
+  for (let i = 0; i < n; i++) if (solid[i]) stroke[i] = 0;
+  // Close badges (a ring round a number) and a crossing street's gap, then
+  // keep only pieces with a good length of route stroke in them, so a run of
+  // badges stays but a cluster of diamonds goes.
+  m = close(m, w, h, Math.max(2, Math.round(5 * k)));
+  const c = components(m, w, h, true), strokePx = new Float64Array(c.count + 1);
+  for (let i = 0; i < n; i++) if (stroke[i] && c.label[i]) strokePx[c.label[i]]++;
+  for (let i = 0; i < n; i++) { const l = c.label[i]; if (l && (strokePx[l] < 80 * k || Math.max(c.x1[l] - c.x0[l], c.y1[l] - c.y0[l]) < 60 * k)) m[i] = 0; }
+  thin(m, w, h);
+  let lines = prune(traceSkeleton(m, w, h), 12 * k, 30 * k).map((l) => simplify(l, 1.2)).filter((l) => lineLength(l) > 25 * k && meanAlong(l, water, w, h) < 0.5);
+  lines = lines.concat(closeGaps(lines, 30 * k));
+  return joinEnds(lines);
+}
+
+// The parts of a line outside a mask, as lines of at least minLen.
+function splitOff(l, mask, w, h, minLen) {
+  const total = lineLength(l), step = 2, out = [];
+  const pts = samplePath(l, 0, total, step);
+  let start = -1;
+  for (let i = 0; i <= pts.length; i++) {
+    const inside = i === pts.length || mask[idx(pts[i][0], pts[i][1], w, h)];
+    if (!inside && start < 0) start = i;
+    if (inside && start >= 0) { const piece = subPath(l, start * step, Math.min(total, i * step)); if (lineLength(piece) >= minLen) out.push(piece); start = -1; }
+  }
+  return out;
+}
+
+// ---------- pictures on the water ----------
+
+function hasLandNeighbour(land, i, w, h) {
+  const x = i % w, y = (i - x) / w;
+  for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+    const xx = x + dx, yy = y + dy;
+    if (xx >= 0 && yy >= 0 && xx < w && yy < h && land[yy * w + xx]) return true;
+  }
+  return false;
+}
+
+// Holes in the water that are drawings (sails with rigging drawn on them)
+// become water. An island's paper is plain inside its shoreline.
+function sailsToWater(fill, ink, w, h, k) {
+  const dry = new Uint8Array(w * h);
+  for (let i = 0; i < dry.length; i++) dry[i] = fill[i] ? 0 : 1;
+  const c = components(dry, w, h, false);
+  const inner = erode(dry, w, h, 3);
+  const inkN = new Uint32Array(c.count + 1), innerInk = new Uint32Array(c.count + 1);
+  for (let i = 0; i < dry.length; i++) { const l = c.label[i]; if (l && ink[i]) { inkN[l]++; if (inner[i]) innerInk[l]++; } }
+  for (let l = 1; l <= c.count; l++) {
+    if (!c.x0[l] || !c.y0[l] || c.x1[l] === w - 1 || c.y1[l] === h - 1) continue;
+    if (c.area[l] < 300 * k * k || c.area[l] > 0.003 * w * h) continue;
+    if (inkN[l] / c.area[l] < 0.15 || innerInk[l] / (inkN[l] || 1) < 0.3) continue;
+    for (let y = c.y0[l]; y <= c.y1[l]; y++) for (let x = c.x0[l]; x <= c.x1[l]; x++) if (c.label[y * w + x] === l) fill[y * w + x] = 1;
+  }
+}
+
+// ---------- border and boxes ----------
+
+// Long straight lines, found as runs of ink (a pixel either side counts, so
+// a line a little off level still runs on), joined across rows into lines.
+export function straightRuns(ink, w, h, minLen, across, maxGap = 0) {
+  const [len, lines] = across ? [w, h] : [h, w];
+  const at = across ? (a, b) => ink[b * w + a] : (a, b) => ink[a * w + b];
+  const segs = [], open = new Map();
+  for (let b = 0; b < lines; b++) {
+    const runs = [];
+    let start = -1, last = -1;
+    for (let a = 0; a <= len; a++) {
+      const on = a < len && (at(a, b) || (b > 0 && at(a, b - 1)) || (b < lines - 1 && at(a, b + 1)));
+      if (on) { if (start < 0) start = a; last = a; }
+      // A gap up to maxGap (a street crossing over the line) doesn't end the run.
+      else if (start >= 0 && (a - last > maxGap || a === len)) { if (last - start + 1 >= minLen) runs.push([start, last]); start = -1; }
+    }
+    const next = new Map();
+    for (const [a0, a1] of runs) {
+      let seg = null;
+      for (const [key, s] of open) if (s.a0 < a1 && a0 < s.a1 && !seg) { seg = s; open.delete(key); }
+      if (!seg) { seg = { a0, a1, b0: b, b1: b }; segs.push(seg); }
+      seg.a0 = Math.min(seg.a0, a0); seg.a1 = Math.max(seg.a1, a1); seg.b1 = b;
+      next.set(seg, seg);
+    }
+    open.clear();
+    for (const s of next.values()) open.set(s, s);
+  }
+  // [start, end, middle across, thickness]
+  return segs.map((s) => [s.a0, s.a1, (s.b0 + s.b1) / 2, s.b1 - s.b0 + 1]);
+}
+
+// The map's border (the innermost long line near each edge of the sheet)
+// and boxes drawn with four straight sides and little ink inside (a title, a
+// legend): many small marks of print inside, and not in among city blocks,
+// which are boxes of four straight sides too. Returns a mask of what's
+// outside the border or in a box.
+export function framesAndBoxes(ink, w, h, k, isBlock) {
+  const minLen = Math.round(100 * k), tol = 10 * k;
+  const c = components(ink, w, h, true);
+  const H = straightRuns(ink, w, h, minLen, true).filter((s) => s[3] <= 40 * k);
+  const V = straightRuns(ink, w, h, minLen, false).filter((s) => s[3] <= 40 * k);
+  const edge = 0.08;
+  // The border is often a band of lines; its inner edge counts.
+  const pick = (segs, size, along, near) => segs.filter((s) => s[1] - s[0] > 0.5 * along && (near ? s[2] < edge * size : s[2] > (1 - edge) * size)).map((s) => s[2] + (near ? 1 : -1) * s[3] / 2);
+  const top = pick(H, h, w, true), bottom = pick(H, h, w, false), left = pick(V, w, h, true), right = pick(V, w, h, false);
+  const neat = top.length && bottom.length && left.length && right.length ? [Math.max(...left), Math.max(...top), Math.min(...right), Math.min(...bottom)] : null;
+  const boxes = [];
+  for (const [ax0, ax1, ay] of H) for (const [bx0, bx1, by] of H) {
+    if (by <= ay + 60 * k) continue;
+    const x0 = Math.max(ax0, bx0), x1 = Math.min(ax1, bx1);
+    if (x1 - x0 < 0.8 * Math.max(ax1 - ax0, bx1 - bx0)) continue;
+    const l = Math.min(ax0, bx0), r = Math.max(ax1, bx1);
+    // A side may be in several pieces where lettering touches it.
+    const side = (x) => {
+      const span = V.filter(([vy0, vy1, vx]) => Math.abs(vx - x) <= 1.5 * tol && vy1 > ay && vy0 < by).map(([vy0, vy1]) => [Math.max(ay, vy0), Math.min(by, vy1)]).sort((p, q) => p[0] - q[0]);
+      let covered = 0, end = ay;
+      for (const [a, b] of span) { if (b > end) { covered += b - Math.max(a, end); end = b; } }
+      return covered >= 0.9 * (by - ay);
+    };
+    if (!side(l) || !side(r)) continue;
+    const area = (r - l) * (by - ay);
+    if (area < 0.004 * w * h || area > 0.2 * w * h) continue;
+    if (neat && l <= neat[0] + tol && r >= neat[2] - tol) continue;
+    // Dense woods also have straight edges; a box is mostly paper inside.
+    let inkIn = 0, m = 0;
+    for (let y = Math.round(ay); y < by; y += 3) for (let x = l; x < r; x += 3) { inkIn += ink[y * w + x]; m++; }
+    if (inkIn / m > 0.4) continue;
+    let marks = 0;
+    for (let q = 1; q <= c.count; q++) {
+      const cx = (c.x0[q] + c.x1[q]) / 2, cy = (c.y0[q] + c.y1[q]) / 2;
+      if (cx > l && cx < r && cy > ay && cy < by && c.area[q] >= 4 && Math.max(c.x1[q] - c.x0[q], c.y1[q] - c.y0[q]) < 30 * k) marks++;
+    }
+    if (area / marks > 3500 * k * k) continue;
+    let around = 0, ring = 0;
+    const d = Math.round(25 * k);
+    for (let y = Math.max(0, Math.round(ay) - d); y < Math.min(h, by + d); y += 2) for (let x = Math.max(0, l - d); x < Math.min(w, r + d); x += 2) {
+      if (x >= l - 8 * k && x <= r + 8 * k && y >= ay - 8 * k && y <= by + 8 * k) continue;
+      ring++; if (isBlock(y * w + x)) around++;
+    }
+    if (around / (ring || 1) > 0.15) continue;
+    if (!boxes.some((b) => Math.abs(b[0] - l) < 20 * k && Math.abs(b[1] - ay) < 20 * k && Math.abs(b[2] - r) < 20 * k && Math.abs(b[3] - by) < 20 * k)) boxes.push([l, Math.round(ay), r, Math.round(by)]);
+  }
+  const crop = new Uint8Array(w * h), pad = Math.round(6 * k);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const out = neat && (x < neat[0] + pad || y < neat[1] + pad || x > neat[2] - pad || y > neat[3] - pad);
+    const inBox = boxes.some(([x0, y0, x1, y1]) => x >= x0 - pad && x <= x1 + pad && y >= y0 - pad && y <= y1 + pad);
+    if (out || inBox) crop[y * w + x] = 1;
+  }
+  return { crop, neat, boxes };
+}
+
+// ---------- hill shading ----------
+
+// Hatching is drawn as short arcs, wider than tall, scattered over an area.
+// Each such mark with at least 8 others round it, spread in both directions
+// rather than along a line, marks a disc of hatching.
+export function hatching(ink, w, h, k) {
+  // Tuned on the 3,500-pixel Halifax scan.
+  k *= 3000 / 3500;
+  const c = components(ink, w, h, true);
+  const n = c.count + 1;
+  const sx = new Float64Array(n), sy = new Float64Array(n), sxx = new Float64Array(n), syy = new Float64Array(n), sxy = new Float64Array(n);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const l = c.label[y * w + x];
+    if (!l) continue;
+    sx[l] += x; sy[l] += y; sxx[l] += x * x; syy[l] += y * y; sxy[l] += x * y;
+  }
+  // Ink that is part of a long printed line (a street edge, a shore).
+  const longInk = new Uint8Array(w * h);
+  for (let i = 0; i < w * h; i++) { const l = c.label[i]; if (l && Math.max(c.x1[l] - c.x0[l], c.y1[l] - c.y0[l]) + 1 >= 150 * k) longInk[i] = 1; }
+  // Loose marks: small, wider than tall. Sure marks also bend (a dash is a
+  // straight bar; an arc's pixels spread across its length as well as
+  // along it) and aren't tiny.
+  const marks = [], sure = [];
+  for (let l = 1; l < n; l++) {
+    const a = c.area[l], bw = c.x1[l] - c.x0[l] + 1, bh = c.y1[l] - c.y0[l] + 1;
+    if (Math.max(bw, bh) < 4 * k || Math.max(bw, bh) >= 45 * k || a < 6 * k * k || bw / bh <= 1.3 || bh > 9 * k || a / (bw * bh) >= 0.7) continue;
+    const mx = sx[l] / a, my = sy[l] / a;
+    const [lo] = eigen2(sxx[l] / a - mx * mx, syy[l] / a - my * my, sxy[l] / a - mx * my);
+    marks.push([mx, my]);
+    sure.push(lo > 0.5 * k * k && Math.max(bw, bh) >= 7 * k);
+  }
+  const R = 40 * k, cell = Math.ceil(R), gw = Math.ceil(w / cell) + 1;
+  const grid = new Map();
+  marks.forEach(([x, y], i) => { const key = Math.floor(y / cell) * gw + Math.floor(x / cell); if (!grid.has(key)) grid.set(key, []); grid.get(key).push(i); });
+  const out = new Uint8Array(w * h), disc = 26 * k;
+  marks.forEach(([x, y], i) => {
+    if (!sure[i]) return;
+    const near = [];
+    let sureNear = 0;
+    const cx = Math.floor(x / cell), cy = Math.floor(y / cell);
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) for (const j of grid.get((cy + dy) * gw + cx + dx) || []) {
+      if (Math.hypot(marks[j][0] - x, marks[j][1] - y) <= R) { near.push(marks[j]); if (sure[j]) sureNear++; }
+    }
+    if (near.length < 8 || sureNear < 4) return;
+    let mx = 0, my = 0;
+    for (const [px, py] of near) { mx += px; my += py; }
+    mx /= near.length; my /= near.length;
+    let vx = 0, vy = 0, cv = 0;
+    for (const [px, py] of near) { vx += (px - mx) ** 2; vy += (py - my) ** 2; cv += (px - mx) * (py - my); }
+    const [lo, hi] = eigen2(vx, vy, cv);
+    if (lo / (hi || 1) <= 0.25) return;
+    for (let yy = Math.max(0, Math.floor(y - disc)); yy <= Math.min(h - 1, y + disc); yy++) for (let xx = Math.max(0, Math.floor(x - disc)); xx <= Math.min(w - 1, x + disc); xx++) {
+      if ((xx - x) ** 2 + (yy - y) ** 2 <= disc * disc) out[yy * w + xx] = 1;
+    }
+  });
+  return { texture: out, longInk: dilate(longInk, w, h, 2) };
+}
+
+// Splits an outline where it zigzags through hatching (corners closer than
+// 8 px apart on average over 40 px), keeping the rest as open lines.
+function cutJagged(p, texture, w, h, k) {
+  const n = p.length, along = [0];
+  for (let i = 1; i < n; i++) along.push(along[i - 1] + Math.hypot(p[i][0] - p[i - 1][0], p[i][1] - p[i - 1][1]));
+  const bad = p.map(([x, y], i) => {
+    if (!texture[idx(x, y, w, h)]) return false;
+    let m = 0;
+    for (let j = 0; j < n; j++) if (Math.abs(along[j] - along[i]) <= 20 * k) m++;
+    return m >= 5;
+  });
+  if (!bad.some(Boolean)) return [p];
+  const out = [];
+  let run = [];
+  for (let i = 0; i < n; i++) {
+    if (bad[i]) { if (run.length > 1) out.push(run); run = []; } else run.push(p[i]);
+  }
+  if (run.length > 1) out.push(run);
+  // The outline is closed: join the last run onto the first.
+  if (!bad[0] && !bad[n - 1] && out.length > 1) { const last = out.pop(); out[0] = last.concat(out[0].slice(1)); }
+  return out.filter((l) => lineLength(l) > 10 * k);
+}
+
+// Eigenvalues of [[a, c], [c, b]], smaller first.
+function eigen2(a, b, c) {
+  const m = (a + b) / 2, d = Math.sqrt(Math.max(0, ((a - b) / 2) ** 2 + c * c));
+  return [m - d, m + d];
+}
+
+// Corners per 100 px of outline: a few for a block, dozens for a scribble.
+function turnsPer100(p) {
+  let len = 0;
+  for (let i = 1; i < p.length; i++) len += Math.hypot(p[i][0] - p[i - 1][0], p[i][1] - p[i - 1][1]);
+  return (p.length / (len || 1)) * 100;
+}
+
 // ---------- railways and dashes ----------
 
 // Railways are drawn as heavy bands (a line with cross ticks), several times
@@ -924,7 +1481,7 @@ function scalePath(d, s) {
 // moreBlocks). Also takes out paper fold creases, which read as long faint
 // straight lines. avoid: where no loose end should be carried on (railways,
 // dashed lines). Returns { edges, inferred, creases }.
-function fillIn({ inkImg, ink, colourInk, fill, crop, blockMask, avoid, edges, shore, w, h, k }) {
+function fillIn({ inkImg, ink, colourInk, gridBand, hints, fill, crop, blockMask, avoid, edges, shore, w, h, k }) {
   const n = w * h;
   const strong = strongInk(inkImg, ink, w, h);
   const strongNear = dilate(strong, w, h, 2);
@@ -944,7 +1501,20 @@ function fillIn({ inkImg, ink, colourInk, fill, crop, blockMask, avoid, edges, s
   const cropNear = dilate(crop, w, h, Math.round(15 * k));
   for (let i = 0; i < n; i++) if (cropNear[i]) skip[i] = 1;
   const blocks = moreBlocks(strong, colourInk, skip, blockMask, kept.concat(shore, loose), w, h, k);
-  return { edges: kept, inferred: loose.concat(blocks), creases };
+  let allBlocks = blocks.mask ? blockMask.map((v, i) => v | blocks.mask[i]) : blockMask, more = blocks.lines;
+  // The grid sometimes runs along a street, standing in for a hidden edge,
+  // and sometimes across a block, cutting it into slivers too thin to pass
+  // for blocks. A second look with the grid not counting as a wall finds
+  // those.
+  // Where a tram route hides a block's edge, the edge found beside the
+  // route stands in for it.
+  if (gridBand) {
+    const walls = colourInk.map((v, i) => v && !gridBand[i]);
+    const again = moreBlocks(strong, walls, skip, allBlocks, kept.concat(shore, loose, more), w, h, k, hints && rasterise(hints, w, h));
+    if (again.mask) allBlocks = allBlocks.map((v, i) => v | again.mask[i]);
+    more = more.concat(again.lines);
+  }
+  return { edges: kept, inferred: loose.concat(more), creases, strong, blocks: allBlocks };
 }
 
 // Printed ink is much darker than a crease's shadow or a stain: halfway
@@ -979,12 +1549,12 @@ function splitFaint(l, strongNear, minLen, w, h, kept, faint) {
 // once coloured ink (a tram route printed over a block's edge) and the lines
 // already found count as edges too, with faint creases not counting. Returns
 // the new blocks' outlines where no line runs yet.
-function moreBlocks(strong, colourInk, skip, blockMask, known, w, h, k) {
+function moreBlocks(strong, colourInk, skip, blockMask, known, w, h, k, extra = null) {
   const n = w * h;
   const r = (px) => Math.max(1, Math.round(px * k));
   const knownMask = rasterise(known, w, h);
   let wall = new Uint8Array(n);
-  for (let i = 0; i < n; i++) wall[i] = strong[i] || colourInk[i] || knownMask[i] ? 1 : 0;
+  for (let i = 0; i < n; i++) wall[i] = strong[i] || colourInk[i] || knownMask[i] || extra?.[i] ? 1 : 0;
   wall = dilate(wall, w, h, 1);
   const paper = new Uint8Array(n);
   for (let i = 0; i < n; i++) paper[i] = !wall[i] ? 1 : 0;
@@ -1001,7 +1571,7 @@ function moreBlocks(strong, colourInk, skip, blockMask, known, w, h, k) {
     if (a < 150 * k * k || a > 0.01 * n || maxw[l] < 6 * k || !clear[l] || had[l] > 0.8 * a || a / (bw * bh) < 0.4) continue;
     keep[l] = 1; any++;
   }
-  if (!any) return [];
+  if (!any) return { lines: [], mask: null };
   const found = new Uint8Array(n);
   for (let i = 0; i < n; i++) if (keep[pc.label[i]]) found[i] = 1;
   const mask = open(dilate(found, w, h, 2), w, h, r(2));
@@ -1024,7 +1594,7 @@ function moreBlocks(strong, colourInk, skip, blockMask, known, w, h, k) {
   // Its edge must be printed nearly all the way round: an open area fenced
   // by dotted paths or hatching isn't a block.
   const printed = new Uint8Array(n);
-  for (let i = 0; i < n; i++) printed[i] = strong[i] || colourInk[i] ? 1 : 0;
+  for (let i = 0; i < n; i++) printed[i] = strong[i] || colourInk[i] || extra?.[i] ? 1 : 0;
   const printedNear = dilate(printed, w, h, r(2) + 1);
   for (const line of shapes) {
     if (meanAlong(line, near, w, h) > 0.95 || meanAlong(line, printedNear, w, h) < 0.9) continue;
@@ -1041,7 +1611,7 @@ function moreBlocks(strong, colourInk, skip, blockMask, known, w, h, k) {
       if (!fresh && start >= 0) { out.push(subPath(line, (start * total) / pieces, (p * total) / pieces)); start = -1; }
     }
   }
-  return out;
+  return { lines: out, mask };
 }
 
 // ---------- evening out ----------
@@ -1081,7 +1651,7 @@ function evenOut(groups, spaceDepth, centres, w, h, k) {
     });
     if (kept.length === before) break;
   }
-  return { groups: groups.map((_, g) => kept.filter((l) => l.g === g)), dropped };
+  return { groups: groups.map((_, g) => kept.filter((l) => l.g === g)), dropped, width: W };
 }
 
 // Joins lines whose ends meet where no third line ends too.
@@ -1092,14 +1662,14 @@ function joinEnds(lines) {
   ls.forEach((l, i) => [0, 1].forEach((s) => { const kk = key(s ? l[l.length - 1] : l[0]); if (!at.has(kk)) at.set(kk, []); at.get(kk).push([i, s]); }));
   const alive = ls.map(() => true), into = ls.map((_, i) => i);
   const find = (i) => { while (into[i] !== i) i = into[i] = into[into[i]]; return i; };
-  for (const ends of at.values()) {
+  for (const [kk, ends] of at) {
     if (ends.length !== 2) continue;
-    let [[i, si], [j, sj]] = ends;
+    let [[i], [j]] = ends;
     i = find(i); j = find(j);
     if (i === j) continue;
     // Each end has to still be an end of the joined line it now belongs to.
-    const a = ls[i], b = ls[j], pa = key(si ? a[a.length - 1] : a[0]), pb = key(sj ? b[b.length - 1] : b[0]);
-    const aEnd = key(a[a.length - 1]) === pa ? 1 : key(a[0]) === pa ? 0 : -1, bEnd = key(b[b.length - 1]) === pb ? 1 : key(b[0]) === pb ? 0 : -1;
+    const a = ls[i], b = ls[j];
+    const aEnd = key(a[a.length - 1]) === kk ? 1 : key(a[0]) === kk ? 0 : -1, bEnd = key(b[b.length - 1]) === kk ? 1 : key(b[0]) === kk ? 0 : -1;
     if (aEnd < 0 || bEnd < 0) continue;
     const left = aEnd ? a : a.slice().reverse(), right = bEnd ? b.slice().reverse() : b;
     ls[i] = left.concat(right.slice(1));
