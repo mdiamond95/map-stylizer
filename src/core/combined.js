@@ -83,11 +83,6 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
   const maxw = new Float32Array(pc.count + 1);
   for (let i = 0; i < n; i++) { const l = pc.label[i]; if (l && depth[i] > maxw[l]) maxw[l] = depth[i]; }
   const crop = boxesOfPrint(ink, pc, w, h);
-  // The map's border and the framed boxes on it (the title, legends) are
-  // found from their long straight sides; nothing in them is map.
-  const frame = framesAndBoxes(ink, w, h, k);
-  for (let i = 0; i < n; i++) if (frame.crop[i]) crop[i] = 1;
-  if (dbg) dbg.boxes = frame.boxes.map(([x0, y0, x1, y1]) => [[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]]);
   const blocks = new Uint8Array(n), streets = new Uint8Array(n);
   const kind = new Uint8Array(pc.count + 1); // 1 block, 2 street
   for (let l = 1; l <= pc.count; l++) {
@@ -98,6 +93,11 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
     if (maxw[l] < 6 * k || a > 0.02 * n || a / (bw * bh) < 0.3) kind[l] = 2;
     else if (a >= 150 * k * k) kind[l] = 1;
   }
+  // The map's border and the framed boxes on it (the title, legends) are
+  // found from their long straight sides; nothing in them is map.
+  const frame = framesAndBoxes(ink, w, h, k, (i) => kind[pc.label[i]] === 1);
+  for (let i = 0; i < n; i++) if (frame.crop[i]) crop[i] = 1;
+  if (dbg) dbg.boxes = frame.boxes.map(([x0, y0, x1, y1]) => [[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]]);
   for (let i = 0; i < n; i++) {
     if (crop[i]) continue;
     const t = kind[pc.label[i]];
@@ -786,9 +786,12 @@ export function straightRuns(ink, w, h, minLen, across) {
 
 // The map's border (the innermost long line near each edge of the sheet)
 // and boxes drawn with four straight sides and little ink inside (a title, a
-// legend). Returns a mask of what's outside the border or in a box.
-export function framesAndBoxes(ink, w, h, k) {
+// legend): many small marks of print inside, and not in among city blocks,
+// which are boxes of four straight sides too. Returns a mask of what's
+// outside the border or in a box.
+export function framesAndBoxes(ink, w, h, k, isBlock) {
   const minLen = Math.round(100 * k), tol = 10 * k;
+  const c = components(ink, w, h, true);
   const H = straightRuns(ink, w, h, minLen, true).filter((s) => s[3] <= 40 * k);
   const V = straightRuns(ink, w, h, minLen, false).filter((s) => s[3] <= 40 * k);
   const edge = 0.08;
@@ -811,12 +814,25 @@ export function framesAndBoxes(ink, w, h, k) {
     };
     if (!side(l) || !side(r)) continue;
     const area = (r - l) * (by - ay);
-    if (area < 0.001 * w * h || area > 0.2 * w * h) continue;
+    if (area < 0.004 * w * h || area > 0.2 * w * h) continue;
     if (neat && l <= neat[0] + tol && r >= neat[2] - tol) continue;
     // Dense woods also have straight edges; a box is mostly paper inside.
     let inkIn = 0, m = 0;
     for (let y = Math.round(ay); y < by; y += 3) for (let x = l; x < r; x += 3) { inkIn += ink[y * w + x]; m++; }
     if (inkIn / m > 0.4) continue;
+    let marks = 0;
+    for (let q = 1; q <= c.count; q++) {
+      const cx = (c.x0[q] + c.x1[q]) / 2, cy = (c.y0[q] + c.y1[q]) / 2;
+      if (cx > l && cx < r && cy > ay && cy < by && c.area[q] >= 4 && Math.max(c.x1[q] - c.x0[q], c.y1[q] - c.y0[q]) < 30 * k) marks++;
+    }
+    if (area / marks > 3500 * k * k) continue;
+    let around = 0, ring = 0;
+    const d = Math.round(25 * k);
+    for (let y = Math.max(0, Math.round(ay) - d); y < Math.min(h, by + d); y += 2) for (let x = Math.max(0, l - d); x < Math.min(w, r + d); x += 2) {
+      if (x >= l - 8 * k && x <= r + 8 * k && y >= ay - 8 * k && y <= by + 8 * k) continue;
+      ring++; if (isBlock(y * w + x)) around++;
+    }
+    if (around / (ring || 1) > 0.15) continue;
     if (!boxes.some((b) => Math.abs(b[0] - l) < 20 * k && Math.abs(b[1] - ay) < 20 * k && Math.abs(b[2] - r) < 20 * k && Math.abs(b[3] - by) < 20 * k)) boxes.push([l, Math.round(ay), r, Math.round(by)]);
   }
   const crop = new Uint8Array(w * h), pad = Math.round(6 * k);
