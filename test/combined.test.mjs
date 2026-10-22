@@ -46,6 +46,10 @@ for (let x = 60; x < 900; x++) {
   if (x % 4 === 0) for (let d = -4; d <= 4; d++) put(x, 790 + d, ink);
 }
 for (let x = 60; x < 900; x += 12) for (let t = 0; t < 7; t++) put(x + t, 830, ink);
+// A red tram route printed right over one block's left edge, from street to
+// street, hiding the blue line under it.
+const routed = blocks[8];
+for (let y = routed[1] - 14; y <= routed[3] + 14; y++) for (let d = -1; d <= 2; d++) put(routed[0] + d, y, red);
 // A red grid line across everything.
 for (let x = 0; x < 960; x++) for (let d = 0; d < 2; d++) put(x, 500 + d, red);
 
@@ -54,15 +58,16 @@ const { layers } = extractCombined(rgba, W, H);
 console.log(`combined (${Date.now() - t} ms):`, layers.map((l) => `${l.name} ${Math.round(l.length)} px${l.show ? '' : ' (hidden)'}`).join(', '));
 const byName = (re) => layers.find((l) => re.test(l.name));
 const pts = (l) => (l?.d.match(/-?[\d.]+,-?[\d.]+/g) || []).map((p) => p.split(',').map(Number));
-const edges = byName(/^Street and block edges$/), shore = byName(/^Water edge$/), grid = byName(/Red/);
+const edges = byName(/^Street and block edges$/), filledIn = byName(/^Filled-in lines$/), shore = byName(/^Water edge$/), grid = byName(/Red/);
 const rail = byName(/^Railways$/), dashes = byName(/^Dashed lines$/);
 assert.ok(edges, 'street and block edges layer');
 assert.ok(shore, 'water edge from the harbour colour');
 assert.ok(grid, 'red grid as its own layer');
 assert.equal(byName(/^Unsure lines$/)?.show ?? false, false, 'unsure lines start hidden');
 
-// Every block's four corners are in the edges layer, square.
-const e = pts(edges);
+// Every block's four corners are in the edges layer, square; the block
+// under the tram route gets its hidden side filled in.
+const e = pts(edges).concat(pts(filledIn));
 let corners = 0;
 for (const [x0, y0, x1, y1] of blocks) for (const [cx, cy] of [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]) if (Math.min(...e.map(([x, y]) => Math.hypot(x - cx, y - cy))) < 4) corners++;
 assert.ok(corners >= blocks.length * 4 * 0.9, `block corners kept (${corners} of ${blocks.length * 4})`);
@@ -70,6 +75,10 @@ assert.ok(corners >= blocks.length * 4 * 0.9, `block corners kept (${corners} of
 const drawn = blocks.length * 2 * (120 + 90);
 assert.ok(edges.length > drawn * 0.9 && edges.length < drawn * 1.15, `edge length ${Math.round(edges.length)} vs ${drawn} drawn`);
 // No line runs through the lettering, away from the block edge it sits on.
+const near = (list, [cx, cy]) => list.some(([x, y]) => Math.hypot(x - cx, y - cy) < 4);
+assert.ok(filledIn && near(pts(filledIn), [routed[0], routed[1]]) && near(pts(filledIn), [routed[0], routed[3]]), 'edge under the tram route filled in');
+// Filled-in lines are straight runs, never wiggly.
+for (const l of (filledIn?.d || '').split('M').filter(Boolean)) assert.ok(l.split('L').length <= 6, `filled-in line has few corners (${l.split('L').length})`);
 const inLetters = e.filter(([x, y]) => letters.some(([x0, y0, x1, y1]) => x > x0 && x < x1 && y > y0 && y < y1)).length;
 assert.equal(inLetters, 0, 'lettering left out');
 // The shoreline runs down the harbour edge, and the piers' outlines into the slip.
@@ -78,10 +87,15 @@ const atPiers = ([, y]) => y > 290 && y < 342;
 assert.ok(s.length && s.filter((p) => !atPiers(p)).every(([x]) => Math.abs(x - 960) < 6), 'shore follows the water edge');
 // (A pier drawn as an outlined patch of paper may come out as a block instead.)
 assert.ok(s.concat(e).filter(([x, y]) => x > 1090 && y > 308 && y < 324).length >= 2, 'outline runs into the slip between the piers');
+// The harbour is also a solid shape, with the piers left out of it.
+const waterArea = layers.find((l) => l.area);
+assert.ok(waterArea && waterArea.name === 'Water' && layers.indexOf(waterArea) === 0, 'water area layer, drawn first');
+const wa = pts(waterArea);
+assert.ok(wa.length && wa.every(([x]) => x > 950), 'water area stays in the harbour');
 // The railway is one line down the band, not in the street edges.
 const rl = pts(rail);
 assert.ok(rail && rl.every(([, y]) => Math.abs(y - 790) < 4) && rail.length > 840 * 0.8, `railway found (${Math.round(rail?.length || 0)} px)`);
 assert.ok(!e.some(([x, y]) => x > 100 && x < 860 && Math.abs(y - 790) < 8), 'railway kept out of the street edges');
 // The dashes are joined into one dashed line.
 assert.ok(dashes && pts(dashes).every(([, y]) => Math.abs(y - 830) < 3) && dashes.length > 840 * 0.8, `dashed line found (${Math.round(dashes?.length || 0)} px)`);
-console.log('combined: blocks square, lettering out, shore, piers, railway, dashes and grid kept');
+console.log('combined: blocks square, edge under a tram route filled in, lettering out, shore, piers, railway, dashes and grid kept');

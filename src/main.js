@@ -514,7 +514,7 @@ function getMatch() {
 function hasLines() { return !!project.linework?.layers?.length; }
 function linesOverlay() {
   if (!hasLines()) return '';
-  return project.linework.layers.filter((l) => l.show !== false).map((l) => `<path class="ck-lines" d="${l.d}" stroke="${l.colour}"/>`).join('');
+  return project.linework.layers.filter((l) => l.show !== false).map((l) => (l.area ? `<path class="ck-area" d="${l.d}" fill="${l.colour}"/>` : `<path class="ck-lines" d="${l.d}" stroke="${l.colour}"/>`)).join('');
 }
 
 async function refreshCheck() {
@@ -660,7 +660,7 @@ $('#lines-run').addEventListener('click', () => {
     const found = project.linework.layers.length;
     if (!found) toast('No lines found. Move “Faint lines” to the left and try again.', 5000);
     else if (method === 'ink') toast(`Found ${found} line ${found === 1 ? 'colour' : 'colours'}. Slide “Map image” down to see them, and untick any you don't want.`, 5000);
-    else toast(`Found ${found} layers. Street centres and Unsure lines start hidden: tick them to see them. Slide “Map image” down to compare with the scan.`, 6000);
+    else toast(`Found ${found} layers. Purple “Filled-in lines” are gaps the app closed itself: check them, tap any wrong ones away, then recolour the layer. Street centres and Unsure lines start hidden.`, 7000);
   };
   linesWorker.postMessage({ id, rgba: data.buffer, width: c.width, height: c.height, options }, [data.buffer]);
 });
@@ -668,7 +668,7 @@ function syncLinesMethod() {
   const ink = $('#lines-method').value === 'ink';
   $('#lines-method-hint').textContent = ink
     ? 'Ink only follows the printed ink. Each ink colour becomes its own layer. Quicker, but lettering that touches lines can stay.'
-    : 'Combined runs several methods and keeps the lines they agree on: block outlines, the shoreline and piers from the water colour, and the ink with street names painted out. Railways and dashed lines (paths, boundaries) get layers of their own. Doubtful lines go in “Unsure lines”, hidden at first. Takes about 40 seconds.';
+    : 'Combined runs several methods and keeps the lines they agree on: block outlines, the shoreline and piers from the water colour, and the ink with street names painted out. Railways and dashed lines (paths, boundaries) get layers of their own. Gaps it can close itself (a line hidden under a street name or a tram route, a block with a side missing) go in “Filled-in lines”, in purple so you can check them. Doubtful lines go in “Unsure lines”, hidden at first. Takes about 30 seconds.';
 }
 $('#lines-method').addEventListener('change', syncLinesMethod);
 function renderLines() {
@@ -739,7 +739,8 @@ function onLinesDraw(phase, xy) {
     const steps = Math.max(1, Math.ceil(Math.hypot(xy[0] - from[0], xy[1] - from[1]) / (r * 0.5)));
     for (let k = 1; k <= steps; k++) {
       const p = [from[0] + (xy[0] - from[0]) * k / steps, from[1] + (xy[1] - from[1]) * k / steps];
-      tidy.lines.forEach((ls, i) => { if (project.linework.layers[i].show !== false) tidy.lines[i] = eraseCircle(ls, p, r, screenToImage(3)); });
+      // Areas (water) aren't rubbed out: cutting a shape's outline would spill its fill.
+      tidy.lines.forEach((ls, i) => { const l = project.linework.layers[i]; if (l.show !== false && !l.area) tidy.lines[i] = eraseCircle(ls, p, r, screenToImage(3)); });
     }
     tidy.last = xy;
     if (!tidy.frame) tidy.frame = requestAnimationFrame(() => { tidy.frame = 0; writeBack(tidy.lines.map((_, i) => i)); refreshCheck(); });

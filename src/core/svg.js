@@ -101,7 +101,10 @@ export function buildSvg(layers, style, opts = {}) {
 // so an editor can change their colour and weight or draw them on.
 export function lineworkGroup(linework, s) {
   const layers = (linework?.layers || []).filter((l) => l.show !== false && l.d);
-  return group('scan-lines', layers.map((l, i) => `<g id="scan-lines-${i + 1}" data-name="${esc(l.name)}"><path d="${l.d}" fill="none" stroke="${l.colour}" stroke-width="${s(linework.strokeWidth ?? 1.4)}" stroke-linecap="round" stroke-linejoin="miter" stroke-miterlimit="4"/></g>`).join(''));
+  // Area layers (water) are solid shapes, with islands as holes.
+  return group('scan-lines', layers.map((l, i) => `<g id="scan-lines-${i + 1}" data-name="${esc(l.name)}">${l.area
+    ? `<path d="${l.d}" fill="${l.colour}" fill-rule="evenodd" stroke="none"/>`
+    : `<path d="${l.d}" fill="none" stroke="${l.colour}" stroke-width="${s(linework.strokeWidth ?? 1.4)}" stroke-linecap="round" stroke-linejoin="miter" stroke-miterlimit="4"/>`}</g>`).join(''));
 }
 
 // Only the scan's own lines on a plain background: no reference data, so no

@@ -9,8 +9,11 @@
 // piece. Lettering never gets two kinds of vote, so it drops out.
 // Two kinds of line no vote can find get their own finders: railways, drawn
 // as heavy hatched bands, and dashed lines, whose dashes are as small as
-// letters.
+// letters. Last, gaps the vote left (a line under a street name or a tram
+// route, a block missing a side) are filled in where the ink backs it up, as
+// a layer of their own to check.
 import { makeInkImage } from './match.js';
+import { inferLines } from './infer.js';
 import { LINEWORK_DEFAULTS, extractLinework, thin, traceSkeleton, prune, simplify, colourName, toPath, lineLength } from './linework.js';
 
 // Sizes below are tuned on a 3,000-pixel-wide city map and scaled from there.
@@ -49,13 +52,24 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
   let fill = new Uint8Array(n);
   for (let i = 0; i < n; i++) if (!ink[i] && chroma[i] > 7 && L[i] > 55) fill[i] = 1;
   fill = open(fill, w, h, 1);
-  keepBig(fill, w, h, 0.002 * n);
+  keepFills(fill, A, B, w, h, 0.002 * n, 1500 * k * k);
+  // Water beside a bright fold or in a narrow lake tip can read darker than
+  // the paper round it and be taken for ink; its colour says it's water.
+  growByColour(fill, ink, L, A, B, w, h, 10, r(12));
   const fillNear = dilate(fill, w, h, r(3));
   for (let i = 0; i < n; i++) if (colourInk[i] && fillNear[i]) fill[i] = 1;
   fillHoles(fill, w, h, 1500 * k * k);
   // Ships and longer names drawn on the water are holes that are mostly ink;
   // islands are mostly paper and stay.
   fillHoles(fill, w, h, 0.002 * n, (cnt, inked) => inked > 0.35 * cnt, ink);
+  // Lettering printed on the water ("Maynards Lake") is water too, even
+  // where it touches the shore: small pieces of ink with water nearly all
+  // round them.
+  inkOnFill(ink, fill, w, h, 30 * k);
+  // Letters joined to the shore line are one big piece of ink, so they are
+  // taken in by closing the water over ink narrower than a letter instead.
+  const closed = close(fill, w, h, r(5));
+  for (let i = 0; i < n; i++) if (closed[i] && ink[i]) fill[i] = 1;
   fill = open(fill, w, h, 1);
 
   onProgress?.('Finding blocks');
@@ -192,6 +206,15 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
   unsureLeft = unsureLeft.concat(others);
   const gaps = closeGaps(kept.edges, 10 * k);
 
+  onProgress?.('Evening out');
+  const even = evenOut([kept.edges.concat(gaps)], spaceDepth, centres, w, h, k);
+  unsureLeft = unsureLeft.concat(even.dropped);
+
+  onProgress?.('Filling in missing lines');
+  // Not along railways or dashed lines, which have layers of their own.
+  const avoid = dilate(rasterise(rails.concat(dashed), w, h), w, h, R + r(3));
+  const filled = fillIn({ inkImg, ink, colourInk, fill, crop, blockMask, avoid, edges: even.groups[0], shore: kept.fill, w, h, k });
+  unsureLeft = unsureLeft.concat(filled.creases);
 
   onProgress?.('Sorting layers');
   const scaled = (ls) => ls.filter((l) => l.length > 1).map((l) => l.map(([x, y]) => [x * out, y * out]));
@@ -200,14 +223,20 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
     return { name, colour, count: ls.length, length: ls.reduce((s, l) => s + lineLength(l), 0), d: toPath(ls), show };
   };
   const main = plain.layers[0];
-  const layers = [layer('Street and block edges', main?.colour || '#2b2f3a', kept.edges.concat(gaps))];
+  const layers = [layer('Street and block edges', main?.colour || '#2b2f3a', filled.edges)];
+  // Filled-in lines are guesses, so they get a colour of their own to check
+  // them by; recolour the layer to match once happy.
+  layers.push(layer('Filled-in lines', '#8a3ffc', filled.inferred));
   if (kept.fill.length) {
     const c = meanColour(rgba, fill, n);
     let fa = 0, fb = 0, m = 0;
     for (let i = 0; i < n; i += 7) if (fill[i]) { fa += A[i]; fb += B[i]; m++; }
     // Greener or bluer than the paper reads as water.
-    const name = fa / m < paperAB[0] - 3 || fb / m < paperAB[1] - 6 ? 'Water edge' : `${colourName(c)} area edges`;
-    layers.push(layer(name, hex(c.map((v) => v * 0.55)), kept.fill));
+    const water = fa / m < paperAB[0] - 3 || fb / m < paperAB[1] - 6;
+    layers.push(layer(water ? 'Water edge' : `${colourName(c)} area edges`, hex(c.map((v) => v * 0.55)), kept.fill));
+    // The same areas as solid shapes, to colour in, drawn under the lines.
+    const areas = layer(water ? 'Water' : `${colourName(c)} areas`, hex(c), fillRings(fill, w, h, 1500 * k * k));
+    if (areas.count) layers.unshift({ ...areas, area: true });
   }
   // Lines in a second ink colour (a red grid, tram routes) pass through as
   // their own layers, one per colour.
@@ -294,20 +323,28 @@ function close(mask, w, h, r) { return erode(dilate(mask, w, h, r), w, h, r); }
 function morph(mask, w, h, r, grow) {
   const tmp = new Uint8Array(w * h), outm = new Uint8Array(w * h);
   // Count of set pixels in a sliding window: any (grow) or all (shrink).
-  const pass = (src, dst, len, lines, at) => {
-    for (let line = 0; line < lines; line++) {
-      let c = 0;
-      for (let t = 0; t < Math.min(r, len); t++) c += src[at(line, t)];
-      for (let t = 0; t < len; t++) {
-        if (t + r < len) c += src[at(line, t + r)];
-        if (t - r - 1 >= 0) c -= src[at(line, t - r - 1)];
-        const span = Math.min(len - 1, t + r) - Math.max(0, t - r) + 1;
-        dst[at(line, t)] = grow ? (c > 0 ? 1 : 0) : (c === span ? 1 : 0);
-      }
+  // Along each row, then down the columns, keeping a running count per
+  // column so the image is read in order.
+  for (let y = 0, base = 0; y < h; y++, base += w) {
+    let c = 0;
+    for (let x = 0; x < Math.min(r, w); x++) c += mask[base + x];
+    for (let x = 0; x < w; x++) {
+      if (x + r < w) c += mask[base + x + r];
+      if (x > r) c -= mask[base + x - r - 1];
+      tmp[base + x] = grow ? +(c > 0) : +(c === Math.min(w - 1, x + r) - Math.max(0, x - r) + 1);
     }
-  };
-  pass(mask, tmp, w, h, (y, x) => y * w + x);
-  pass(tmp, outm, h, w, (x, y) => y * w + x);
+  }
+  const cnt = new Int32Array(w);
+  for (let y = 0; y < Math.min(r, h); y++) for (let x = 0, i = y * w; x < w; x++, i++) cnt[x] += tmp[i];
+  for (let y = 0; y < h; y++) {
+    const add = y + r < h ? (y + r) * w : -1, sub = y > r ? (y - r - 1) * w : -1;
+    const span = Math.min(h - 1, y + r) - Math.max(0, y - r) + 1;
+    if (add >= 0) for (let x = 0; x < w; x++) cnt[x] += tmp[add + x];
+    if (sub >= 0) for (let x = 0; x < w; x++) cnt[x] -= tmp[sub + x];
+    const row = y * w;
+    if (grow) for (let x = 0; x < w; x++) outm[row + x] = +(cnt[x] > 0);
+    else for (let x = 0; x < w; x++) outm[row + x] = +(cnt[x] === span);
+  }
   return outm;
 }
 
@@ -364,9 +401,60 @@ function components(mask, w, h, diagonal) {
   return { label, count, area, x0, y0, x1, y1 };
 }
 
-function keepBig(mask, w, h, minArea) {
+// Keeps the big coloured areas, and smaller ones (a lake, a pond) the same
+// colour as the big ones.
+function keepFills(mask, A, B, w, h, bigArea, minArea) {
   const c = components(mask, w, h, true);
-  for (let i = 0; i < mask.length; i++) if (mask[i] && c.area[c.label[i]] < minArea) mask[i] = 0;
+  const sa = new Float64Array(c.count + 1), sb = new Float64Array(c.count + 1);
+  for (let i = 0; i < mask.length; i++) { const l = c.label[i]; if (l) { sa[l] += A[i]; sb[l] += B[i]; } }
+  let ba = 0, bb = 0, bn = 0;
+  for (let l = 1; l <= c.count; l++) if (c.area[l] >= bigArea) { ba += sa[l]; bb += sb[l]; bn += c.area[l]; }
+  const keep = new Uint8Array(c.count + 1);
+  for (let l = 1; l <= c.count; l++) {
+    const a = c.area[l];
+    keep[l] = a >= bigArea || (bn && a >= minArea && Math.hypot(sa[l] / a - ba / bn, sb[l] / a - bb / bn) < 5) ? 1 : 0;
+  }
+  for (let i = 0; i < mask.length; i++) if (mask[i] && !keep[c.label[i]]) mask[i] = 0;
+}
+
+// Pixels within `tol` (Lab) of the fill's colour, joined to the fill, are fill
+// and not ink.
+function growByColour(fill, ink, L, A, B, w, h, tol, gap) {
+  const n = w * h;
+  let sl = 0, sa = 0, sb = 0, m = 0;
+  for (let i = 0; i < n; i++) if (fill[i]) { sl += L[i]; sa += A[i]; sb += B[i]; m++; }
+  if (!m) return;
+  sl /= m; sa /= m; sb /= m;
+  const like = new Uint8Array(n);
+  for (let i = 0; i < n; i++) like[i] = fill[i] || Math.hypot(L[i] - sl, A[i] - sa, B[i] - sb) < tol ? 1 : 0;
+  const c = components(like, w, h, true);
+  // Joined across a fold or a grid line, too.
+  const near = dilate(fill, w, h, gap);
+  const wet = new Uint8Array(c.count + 1);
+  for (let i = 0; i < n; i++) if (near[i]) wet[c.label[i]] = 1;
+  for (let i = 0; i < n; i++) if (like[i] && !fill[i] && wet[c.label[i]]) { fill[i] = 1; ink[i] = 0; }
+}
+
+// Small pieces of ink (lettering, up to `size` across) that are at least 70%
+// surrounded by the fill become part of it.
+function inkOnFill(ink, fill, w, h, size) {
+  const c = components(ink, w, h, true);
+  const wet = new Uint32Array(c.count + 1), dry = new Uint32Array(c.count + 1);
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const i = y * w + x;
+    if (ink[i]) continue;
+    // A paper or water pixel next to a piece of ink counts for that piece.
+    for (const j of [i - 1, i + 1, i - w, i + w]) {
+      const l = c.label[j];
+      if (!l) continue;
+      if (fill[i]) wet[l]++; else dry[l]++;
+    }
+  }
+  for (let i = 0; i < ink.length; i++) {
+    const l = c.label[i];
+    if (!l || c.x1[l] - c.x0[l] > size || c.y1[l] - c.y0[l] > size) continue;
+    if (wet[l] >= 0.7 * (wet[l] + dry[l])) fill[i] = 1;
+  }
 }
 
 // Fill holes in the mask smaller than maxArea (lettering left as holes in a
@@ -428,7 +516,10 @@ function boxesOfPrint(ink, pc, w, h) {
 // ---------- shapes ----------
 
 // Outline of each block, simplified, then squared up where that keeps the shape.
-function blockOutlines(mask, w, h, minArea) {
+// With minEdge, only straight-sided outlines: every edge at least that long
+// (a bump of lettering on a side is cut off) and still the block's shape, or
+// none at all; never a wiggly one.
+function blockOutlines(mask, w, h, minArea, minEdge = 0) {
   const c = components(mask, w, h, true);
   const outs = [];
   for (let l = 1; l <= c.count; l++) {
@@ -436,10 +527,71 @@ function blockOutlines(mask, w, h, minArea) {
     const ring = traceOutline(c.label, l, w, h, c.y0[l] * w + firstX(c.label, l, w, c.y0[l], c.x0[l], c.x1[l]));
     if (ring.length < 8) continue;
     const coarse = simplify(ring.concat([ring[0]]), 1.5);
-    const sq = squareUp(simplify(ring.concat([ring[0]]), 2.5));
-    outs.push(sq && overlap(sq, coarse) > 0.9 ? sq : coarse);
+    const rough = simplify(ring.concat([ring[0]]), 2.5);
+    if (minEdge) {
+      const sides = dropShortEdges(simplify(ring.concat([ring[0]]), 3), minEdge);
+      const sq = sides && squareUp(sides);
+      const best = sq && overlap(sq, coarse) > 0.85 ? sq : sides;
+      if (best && overlap(best, coarse) > 0.85 && !hasSpike(best)) outs.push(best);
+      continue;
+    }
+    // Squared only where the block really is square: a rounded end (a
+    // running track, a crescent) keeps its curve.
+    const sq = squareUp(rough);
+    outs.push(sq && overlap(sq, coarse) > 0.9 && farthest(coarse, sq) <= 2.5 ? sq : coarse);
   }
   return outs;
+}
+
+// How far the farthest point of one line is from another.
+function farthest(from, to) {
+  let worst = 0;
+  for (const p of from) {
+    let best = Infinity;
+    for (let i = 1; i < to.length; i++) {
+      const a = to[i - 1], b = to[i], dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy;
+      const t = l2 ? Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l2)) : 0;
+      best = Math.min(best, Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy));
+    }
+    worst = Math.max(worst, best);
+  }
+  return worst;
+}
+
+// A corner sharper than 30 degrees on a closed outline: a spike, not a block.
+function hasSpike(p) {
+  const m = p.length - 1;
+  for (let i = 0; i < m; i++) {
+    const a = p[(i - 1 + m) % m], b = p[i], c = p[(i + 1) % m];
+    const u = [a[0] - b[0], a[1] - b[1]], v = [c[0] - b[0], c[1] - b[1]];
+    const cos = (u[0] * v[0] + u[1] * v[1]) / (Math.hypot(...u) * Math.hypot(...v) || 1);
+    if (cos > Math.cos(Math.PI / 6)) return true;
+  }
+  return false;
+}
+
+// A closed outline with every edge at least minEdge long: the shortest edge
+// goes, its neighbours carried on to meet, until none is too short. Null
+// if fewer than three edges are left.
+function dropShortEdges(p, minEdge) {
+  let pts = p.slice(0, -1);
+  const len = (i) => { const a = pts[i], b = pts[(i + 1) % pts.length]; return Math.hypot(b[0] - a[0], b[1] - a[1]); };
+  while (pts.length > 3) {
+    let s = 0;
+    for (let i = 1; i < pts.length; i++) if (len(i) < len(s)) s = i;
+    if (len(s) >= minEdge) break;
+    const m = pts.length, a = pts[(s - 1 + m) % m], b = pts[s], c = pts[(s + 1) % m], d = pts[(s + 2) % m];
+    // Where the edges before and after meet, if near; else the short edge's middle.
+    const den = (b[0] - a[0]) * (d[1] - c[1]) - (b[1] - a[1]) * (d[0] - c[0]);
+    let q = [(b[0] + c[0]) / 2, (b[1] + c[1]) / 2];
+    if (Math.abs(den) > 1e-6) {
+      const t = ((c[0] - a[0]) * (d[1] - c[1]) - (c[1] - a[1]) * (d[0] - c[0])) / den;
+      const x = [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])];
+      if (Math.hypot(x[0] - q[0], x[1] - q[1]) < 2 * minEdge) q = x;
+    }
+    pts = s === m - 1 ? [q, ...pts.slice(1, s)] : [...pts.slice(0, s), q, ...pts.slice(s + 2)];
+  }
+  return pts.length >= 3 ? pts.concat([pts[0]]) : null;
 }
 
 function firstX(label, l, w, y, x0, x1) { for (let x = x0; x <= x1; x++) if (label[y * w + x] === l) return x; return x0; }
@@ -540,6 +692,27 @@ function streetCentres(space, w, h) {
   thin(m, w, h);
   const unit = Math.max(w, h);
   return prune(traceSkeleton(m, w, h), unit * 0.005, unit * 0.012).map((l) => simplify(l, 1.2)).filter((l) => lineLength(l) > unit * 0.004);
+}
+
+// The outline of each coloured area, and of each island in it, as closed
+// rings; filled even-odd, the islands come out as holes.
+function fillRings(fill, w, h, minArea) {
+  const rings = [];
+  const add = (c, l) => {
+    const ring = traceOutline(c.label, l, w, h, c.y0[l] * w + firstX(c.label, l, w, c.y0[l], c.x0[l], c.x1[l]));
+    if (ring.length >= 8) rings.push(simplify(ring.concat([ring[0]]), 1.2));
+  };
+  const wet = components(fill, w, h, true);
+  for (let l = 1; l <= wet.count; l++) if (wet.area[l] >= minArea) add(wet, l);
+  // Dry patches not touching the edge of the image are surrounded by water.
+  const dry = new Uint8Array(w * h);
+  for (let i = 0; i < dry.length; i++) dry[i] = fill[i] ? 0 : 1;
+  const land = components(dry, w, h, false);
+  for (let l = 1; l <= land.count; l++) {
+    if (land.area[l] < minArea || !land.x0[l] || !land.y0[l] || land.x1[l] === w - 1 || land.y1[l] === h - 1) continue;
+    add(land, l);
+  }
+  return rings;
 }
 
 // The edge of each coloured fill, as lines.
@@ -742,4 +915,250 @@ function closeGaps(lines, maxGap) {
 function scalePath(d, s) {
   if (s === 1) return d;
   return d.replace(/-?[\d.]+/g, (v) => String(Math.round(+v * s * 10) / 10));
+}
+
+// ---------- filling in ----------
+
+// Lines the vote left broken or never found, guessed from the lines round
+// them and checked against the ink (loose ends in infer.js, whole blocks in
+// moreBlocks). Also takes out paper fold creases, which read as long faint
+// straight lines. avoid: where no loose end should be carried on (railways,
+// dashed lines). Returns { edges, inferred, creases }.
+function fillIn({ inkImg, ink, colourInk, fill, crop, blockMask, avoid, edges, shore, w, h, k }) {
+  const n = w * h;
+  const strong = strongInk(inkImg, ink, w, h);
+  const strongNear = dilate(strong, w, h, 2);
+  const kept = [], creases = [];
+  for (const l of edges) splitFaint(l, strongNear, 40 * k, w, h, kept, creases);
+  const evidence = new Uint8Array(n), skip = new Uint8Array(n);
+  // Not in the water, boxes of print, or the margin (the map's frame).
+  const water = erode(fill, w, h, 2), margin = Math.round(0.03 * Math.max(w, h));
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x;
+    evidence[i] = strong[i] || colourInk[i] ? 1 : 0;
+    skip[i] = water[i] || crop[i] || x < margin || y < margin || x >= w - margin || y >= h - margin ? 1 : 0;
+  }
+  const skipLines = avoid ? skip.map((v, i) => v || avoid[i]) : skip;
+  const loose = inferLines(kept.concat(shore), evidence, skipLines, w, h, k).lines;
+  // Blocks keep further from boxes of print, whose frames make good fake blocks.
+  const cropNear = dilate(crop, w, h, Math.round(15 * k));
+  for (let i = 0; i < n; i++) if (cropNear[i]) skip[i] = 1;
+  const blocks = moreBlocks(strong, colourInk, skip, blockMask, kept.concat(shore, loose), w, h, k);
+  return { edges: kept, inferred: loose.concat(blocks), creases };
+}
+
+// Printed ink is much darker than a crease's shadow or a stain: halfway
+// between the paper and the typical ink.
+function strongInk(img, ink, w, h) {
+  const n = w * h, hist = new Uint32Array(101);
+  let m = 0;
+  for (let i = 0; i < n; i += 5) if (ink[i]) { const x = i % w; hist[Math.min(100, Math.round((100 * img.gray[i]) / Math.max(1, paperAt(img, x, (i - x) / w))))]++; m++; }
+  let med = 0;
+  for (let acc = 0; med < 100; med++) { acc += hist[med]; if (acc >= m / 2) break; }
+  const cut = Math.min(0.9, Math.max(0.5, (1 + med / 100) / 2));
+  const out = new Uint8Array(n);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const i = y * w + x; if (ink[i] && img.gray[i] < paperAt(img, x, y) * cut) out[i] = 1; }
+  return out;
+}
+
+// Splits off long straight stretches with almost no strong ink under them.
+function splitFaint(l, strongNear, minLen, w, h, kept, faint) {
+  let run = [l[0]];
+  for (let i = 1; i < l.length; i++) {
+    const seg = [l[i - 1], l[i]];
+    if (lineLength(seg) > minLen && meanAlong(seg, strongNear, w, h) < 0.3) {
+      if (run.length > 1) kept.push(run);
+      faint.push(seg);
+      run = [l[i]];
+    } else run.push(l[i]);
+  }
+  if (run.length > 1) kept.push(run);
+}
+
+// Blocks the first pass missed: patches of paper that are fully enclosed
+// once coloured ink (a tram route printed over a block's edge) and the lines
+// already found count as edges too, with faint creases not counting. Returns
+// the new blocks' outlines where no line runs yet.
+function moreBlocks(strong, colourInk, skip, blockMask, known, w, h, k) {
+  const n = w * h;
+  const r = (px) => Math.max(1, Math.round(px * k));
+  const knownMask = rasterise(known, w, h);
+  let wall = new Uint8Array(n);
+  for (let i = 0; i < n; i++) wall[i] = strong[i] || colourInk[i] || knownMask[i] ? 1 : 0;
+  wall = dilate(wall, w, h, 1);
+  const paper = new Uint8Array(n);
+  for (let i = 0; i < n; i++) paper[i] = !wall[i] ? 1 : 0;
+  const pc = components(paper, w, h, false);
+  const depth = chamfer(paper, w, h);
+  const maxw = new Float32Array(pc.count + 1), clear = new Uint8Array(pc.count + 1).fill(1), had = new Uint32Array(pc.count + 1);
+  for (let i = 0; i < n; i++) { const l = pc.label[i]; if (!l) continue; if (depth[i] > maxw[l]) maxw[l] = depth[i]; if (blockMask[i]) had[l]++; if (skip[i]) clear[l] = 0; }
+  // Block-sized, wide enough not to be a street, compact, clear of water,
+  // print and the margin, and not one the first pass already has.
+  const keep = new Uint8Array(pc.count + 1);
+  let any = 0;
+  for (let l = 1; l <= pc.count; l++) {
+    const a = pc.area[l], bw = pc.x1[l] - pc.x0[l] + 1, bh = pc.y1[l] - pc.y0[l] + 1;
+    if (a < 150 * k * k || a > 0.01 * n || maxw[l] < 6 * k || !clear[l] || had[l] > 0.8 * a || a / (bw * bh) < 0.4) continue;
+    keep[l] = 1; any++;
+  }
+  if (!any) return [];
+  const found = new Uint8Array(n);
+  for (let i = 0; i < n; i++) if (keep[pc.label[i]]) found[i] = 1;
+  const mask = open(dilate(found, w, h, 2), w, h, r(2));
+  const shapes = blockOutlines(mask, w, h, 150 * k * k, 12 * k);
+  // A block mostly outlined already adds nothing. An edge along coloured ink
+  // with block on both sides is a grid line cutting a block in two, not a
+  // street edge under a tram route.
+  const R = Math.max(3, r(3)), near = dilate(knownMask, w, h, R), colourNear = dilate(colourInk, w, h, r(2)), piece = 8 * k, out = [];
+  const side = 6 * k;
+  const isBlock = (x, y) => { const i = idx(x, y, w, h); return blockMask[i] || mask[i]; };
+  const cut = (pts) => {
+    let both = 0;
+    for (let j = 1; j < pts.length; j++) {
+      const [ax, ay] = pts[j - 1], [bx, by] = pts[j], l = Math.hypot(bx - ax, by - ay) || 1;
+      const nx = (-(by - ay) / l) * side, ny = ((bx - ax) / l) * side;
+      if (isBlock(bx + nx, by + ny) && isBlock(bx - nx, by - ny)) both++;
+    }
+    return both > 0.5 * (pts.length - 1);
+  };
+  // Its edge must be printed nearly all the way round: an open area fenced
+  // by dotted paths or hatching isn't a block.
+  const printed = new Uint8Array(n);
+  for (let i = 0; i < n; i++) printed[i] = strong[i] || colourInk[i] ? 1 : 0;
+  const printedNear = dilate(printed, w, h, r(2) + 1);
+  for (const line of shapes) {
+    if (meanAlong(line, near, w, h) > 0.95 || meanAlong(line, printedNear, w, h) < 0.9) continue;
+    const total = lineLength(line), pieces = Math.max(1, Math.round(total / piece));
+    let start = -1;
+    for (let p = 0; p <= pieces; p++) {
+      let fresh = false;
+      if (p < pieces) {
+        const pts = samplePath(line, (p * total) / pieces, ((p + 1) * total) / pieces, 2);
+        const frac = (m) => pts.reduce((s, [x, y]) => s + m[idx(x, y, w, h)], 0) / pts.length;
+        fresh = frac(near) < 0.6 && !(frac(colourNear) >= 0.5 && cut(pts));
+      }
+      if (fresh && start < 0) start = p;
+      if (!fresh && start >= 0) { out.push(subPath(line, (start * total) / pieces, (p * total) / pieces)); start = -1; }
+    }
+  }
+  return out;
+}
+
+// ---------- evening out ----------
+
+// Streets keep much the same width, so the usual width is the yardstick for
+// what a real line can do: an edge doesn't jut a little way into the road and
+// come back (lettering touching it), a line end doesn't hook off into the
+// road, and a short stub sticking off a line into the road is a scrap of
+// lettering, not a street. groups: lists of lines, checked together.
+// Returns { groups, dropped }.
+function evenOut(groups, spaceDepth, centres, w, h, k) {
+  // Usual street width: twice the distance from a street's centre line to its edges.
+  const widths = [];
+  for (const l of centres) for (const [x, y] of samplePath(l, 0, lineLength(l), 6)) { const d = spaceDepth[idx(x, y, w, h)]; if (d > 1 && d < 100 * k) widths.push(2 * d); }
+  widths.sort((a, b) => a - b);
+  const W = widths.length > 50 ? widths[widths.length >> 1] : 20 * k;
+  const dropped = [];
+  // Pieces that meet end to end are joined first, so a jog that straddles
+  // two pieces shows up as one.
+  let kept = [];
+  groups.forEach((ls, g) => { for (const l of joinEnds(ls)) { const t = trimHooks(flattenBumps(l, W), W); if (t.length > 1) kept.push(Object.assign(t, { g })); } });
+  // Stubs: short lines with a free end. A few rounds, as a zigzag of
+  // lettering comes off one stub at a time.
+  for (let round = 0; round < 3; round++) {
+    const owner = new Int32Array(w * h);
+    kept.forEach((l, i) => { for (const [x, y] of samplePath(l, 0, lineLength(l), 0.7)) owner[idx(x, y, w, h)] = i + 1; });
+    const free = (p, id) => {
+      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) { const o = owner[idx(p[0] + dx, p[1] + dy, w, h)]; if (o && o !== id) return false; }
+      return true;
+    };
+    const before = kept.length;
+    kept = kept.filter((l, i) => {
+      if (lineLength(l) >= 1.5 * W || Math.hypot(l[0][0] - l[l.length - 1][0], l[0][1] - l[l.length - 1][1]) < 0.5) return true;
+      if (!free(l[0], i + 1) && !free(l[l.length - 1], i + 1)) return true;
+      dropped.push(l);
+      return false;
+    });
+    if (kept.length === before) break;
+  }
+  return { groups: groups.map((_, g) => kept.filter((l) => l.g === g)), dropped };
+}
+
+// Joins lines whose ends meet where no third line ends too.
+function joinEnds(lines) {
+  const ls = lines.filter((l) => l.length > 1).map((l) => l.slice());
+  const key = (p) => `${Math.round(p[0] / 2)},${Math.round(p[1] / 2)}`;
+  const at = new Map();
+  ls.forEach((l, i) => [0, 1].forEach((s) => { const kk = key(s ? l[l.length - 1] : l[0]); if (!at.has(kk)) at.set(kk, []); at.get(kk).push([i, s]); }));
+  const alive = ls.map(() => true), into = ls.map((_, i) => i);
+  const find = (i) => { while (into[i] !== i) i = into[i] = into[into[i]]; return i; };
+  for (const ends of at.values()) {
+    if (ends.length !== 2) continue;
+    let [[i, si], [j, sj]] = ends;
+    i = find(i); j = find(j);
+    if (i === j) continue;
+    // Each end has to still be an end of the joined line it now belongs to.
+    const a = ls[i], b = ls[j], pa = key(si ? a[a.length - 1] : a[0]), pb = key(sj ? b[b.length - 1] : b[0]);
+    const aEnd = key(a[a.length - 1]) === pa ? 1 : key(a[0]) === pa ? 0 : -1, bEnd = key(b[b.length - 1]) === pb ? 1 : key(b[0]) === pb ? 0 : -1;
+    if (aEnd < 0 || bEnd < 0) continue;
+    const left = aEnd ? a : a.slice().reverse(), right = bEnd ? b.slice().reverse() : b;
+    ls[i] = left.concat(right.slice(1));
+    alive[j] = false; into[j] = i;
+  }
+  return ls.filter((_, i) => alive[i]);
+}
+
+// How far a line turns at b, in radians.
+function bend(a, b, c) {
+  const u = [b[0] - a[0], b[1] - a[1]], v = [c[0] - b[0], c[1] - b[1]];
+  return Math.acos(Math.max(-1, Math.min(1, (u[0] * v[0] + u[1] * v[1]) / ((Math.hypot(...u) * Math.hypot(...v)) || 1))));
+}
+
+// Takes out short detours off a straight run: points between two others
+// that are less than two street widths apart, with the line coming in and
+// going on in that same direction, turning sharply off it and back, and
+// nothing between straying more than half a street width. A curve turns
+// gently all along, so it stays.
+function flattenBumps(l, W) {
+  const closed = l.length > 3 && Math.hypot(l[0][0] - l[l.length - 1][0], l[0][1] - l[l.length - 1][1]) < 0.5;
+  let pts = closed ? l.slice(0, -1) : l.slice();
+  // A closed outline is walked from the start of its longest side, so no
+  // detour straddles the join.
+  if (closed) {
+    let best = 0, bl = 0;
+    for (let i = 0; i < pts.length; i++) { const a = pts[i], b = pts[(i + 1) % pts.length], d = Math.hypot(b[0] - a[0], b[1] - a[1]); if (d > bl) { bl = d; best = i; } }
+    pts = pts.slice(best).concat(pts.slice(0, best), [pts[best]]);
+  }
+  const unit = (a, b) => { const d = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1; return [(b[0] - a[0]) / d, (b[1] - a[1]) / d]; };
+  const c20 = Math.cos(Math.PI / 9);
+  for (let i = 1; i < pts.length - 2; i++) {
+    for (let j = Math.min(pts.length - 2, i + 8); j >= i + 2; j--) {
+      const a = pts[i], b = pts[j], base = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      if (base < 1 || base > 2 * W) continue;
+      if (bend(pts[i - 1], a, pts[i + 1]) < Math.PI / 4 || bend(pts[j - 1], b, pts[j + 1]) < Math.PI / 4) continue;
+      const u = unit(a, b);
+      if (u[0] * unit(pts[i - 1], a)[0] + u[1] * unit(pts[i - 1], a)[1] < c20) continue;
+      if (u[0] * unit(b, pts[j + 1])[0] + u[1] * unit(b, pts[j + 1])[1] < c20) continue;
+      let far = 0;
+      for (let m = i + 1; m < j; m++) far = Math.max(far, Math.abs((pts[m][0] - a[0]) * u[1] - (pts[m][1] - a[1]) * u[0]));
+      if (far > 0.5 * W) continue;
+      pts.splice(i + 1, j - i - 1);
+      break;
+    }
+  }
+  // Points left in a straight row merge.
+  return simplify(pts, 0.75);
+}
+
+// A line end that turns sharply off for less than half a street width is a
+// hook into the road (a letter's stroke), not part of the line.
+function trimHooks(l, W) {
+  const turn = (a, b, c) => { const u = [b[0] - a[0], b[1] - a[1]], v = [c[0] - b[0], c[1] - b[1]]; return (u[0] * v[0] + u[1] * v[1]) / ((Math.hypot(...u) * Math.hypot(...v)) || 1); };
+  let pts = l;
+  for (let pass = 0; pass < 2 && pts.length > 2; pass++) {
+    const n = pts.length;
+    if (Math.hypot(pts[n - 1][0] - pts[n - 2][0], pts[n - 1][1] - pts[n - 2][1]) < 0.5 * W && turn(pts[n - 3], pts[n - 2], pts[n - 1]) < Math.cos(Math.PI / 4)) pts = pts.slice(0, -1);
+    if (pts.length > 2 && Math.hypot(pts[1][0] - pts[0][0], pts[1][1] - pts[0][1]) < 0.5 * W && turn(pts[2], pts[1], pts[0]) < Math.cos(Math.PI / 4)) pts = pts.slice(1);
+  }
+  return pts;
 }

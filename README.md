@@ -43,6 +43,21 @@ the lines before they are traced, so streets don't zigzag up through the letters
 fills a street completely, a stretch of the street's edge can go with it; untick the box and pull
 again if you'd rather keep those and tidy by hand.
 
+The **Combined** method also fills in gaps on its own: a street edge hidden under a name or a
+tram route, a corner left open, a block missing a side, or a whole block that only closes up once
+the coloured route over its edge counts as edge. It only fills a gap where ink runs under it, so
+a street crossing stays open. Its guesses go in **Filled-in lines**, purple so they're easy to
+check; tap away any that are wrong, then recolour the layer to match the streets. Filled-in lines
+are always straight. It also evens out the edges using the usual width of the roads as a yardstick:
+small jogs where lettering touched an edge are straightened, hooked line ends are trimmed, and
+short stubs poking into a road are moved to Unsure lines.
+
+Water is found by its colour as well as its outline. **Water** is a solid layer of filled shapes
+(harbour, lakes, with islands and piers left as holes) that you can recolour in your editor, while
+**Water edge** keeps the shoreline as strokes. Lettering printed on the water, a fold or a grid line
+across it, and a lake tip that reads darker than the paper around it all count as water, so a lake
+comes out as one clean shape.
+
 **Tidy by hand** (under the colour list) cleans up whatever is left: tap a leftover squiggle to
 delete that line, or drag one finger to rub out bits of line with the eraser. Two fingers still
 move and zoom, and **Undo** steps back. Edits are saved with the project and go into the export.
