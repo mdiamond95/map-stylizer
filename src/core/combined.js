@@ -295,7 +295,7 @@ export function extractCombined(rgba, w, h, options = {}, onProgress) {
   const gaps = closeGaps(kept.edges, 10 * k);
 
   onProgress?.('Evening out');
-  const even = evenOut([kept.edges.concat(gaps)], spaceDepth, centres, w, h, k);
+  const even = evenOut([kept.edges.concat(gaps)], spaceDepth, centres, w, h, k, yard.lineWeight || 1.6 * k, ink);
   unsureLeft = unsureLeft.concat(even.dropped);
 
   // Lines in a second ink colour: the reference grid printed over the map,
@@ -1794,7 +1794,7 @@ function moreBlocks(strong, colourInk, skip, blockMask, known, w, h, k, extra = 
 // road, and a short stub sticking off a line into the road is a scrap of
 // lettering, not a street. groups: lists of lines, checked together.
 // Returns { groups, dropped }.
-function evenOut(groups, spaceDepth, centres, w, h, k) {
+function evenOut(groups, spaceDepth, centres, w, h, k, lw, ink) {
   // Usual street width: twice the distance from a street's centre line to its edges.
   const widths = [];
   for (const l of centres) for (const [x, y] of samplePath(l, 0, lineLength(l), 6)) { const d = spaceDepth[idx(x, y, w, h)]; if (d > 1 && d < 100 * k) widths.push(2 * d); }
@@ -1804,7 +1804,7 @@ function evenOut(groups, spaceDepth, centres, w, h, k) {
   // Pieces that meet end to end are joined first, so a jog that straddles
   // two pieces shows up as one.
   let kept = [];
-  groups.forEach((ls, g) => { for (const l of joinEnds(ls)) { const t = trimHooks(flattenBumps(l, W), W); if (t.length > 1) kept.push(Object.assign(t, { g })); } });
+  groups.forEach((ls, g) => { for (const l of joinEnds(ls)) { const t = trimHooks(flattenBumps(straightenTeeth(l, lw, ink, w, h), W), W); if (t.length > 1) kept.push(Object.assign(t, { g })); } });
   // Stubs: short lines with a free end. A few rounds, as a zigzag of
   // lettering comes off one stub at a time.
   for (let round = 0; round < 3; round++) {
@@ -1824,6 +1824,85 @@ function evenOut(groups, spaceDepth, centres, w, h, k) {
     if (kept.length === before) break;
   }
   return { groups: groups.map((_, g) => kept.filter((l) => l.g === g)), dropped, width: W };
+}
+
+// Saw teeth: a run that zigzags back and forth across a straight course,
+// a little way either side, again and again (an outline traced round a row
+// of tree crowns, or round lettering along a street edge), becomes the
+// straight line down its course, moved across to where it runs along the
+// most ink (the street line the lettering touches, the middle of the row of
+// crowns). A real curve or a single jog bends one way, or once, so it
+// stays. lw: the map's line weight.
+function straightenTeeth(l, lw, ink, w, h) {
+  if (l.length < 4) return l;
+  // The line at one point per pixel, so the tests go by length, not by
+  // how many corners the tracing happened to keep.
+  const pts = [l[0]];
+  for (let i = 1; i < l.length; i++) {
+    const [ax, ay] = l[i - 1], [bx, by] = l[i], L = Math.hypot(bx - ax, by - ay), m = Math.max(1, Math.round(L));
+    for (let t = 1; t <= m; t++) pts.push([ax + (bx - ax) * t / m, ay + (by - ay) * t / m]);
+  }
+  const n = pts.length, reach = 4 * lw, minLen = Math.round(20 * lw), step = Math.max(2, Math.round(lw));
+  if (n < minLen) return l;
+  // Straight line through pts[a..b] (total least squares): a point on it, its way.
+  const fit = (a, b) => {
+    let sx = 0, sy = 0;
+    for (let i = a; i <= b; i++) { sx += pts[i][0]; sy += pts[i][1]; }
+    const m = b - a + 1, cx = sx / m, cy = sy / m;
+    let xx = 0, yy = 0, xy = 0;
+    for (let i = a; i <= b; i++) { const dx = pts[i][0] - cx, dy = pts[i][1] - cy; xx += dx * dx; yy += dy * dy; xy += dx * dy; }
+    const t = 0.5 * Math.atan2(2 * xy, xx - yy);
+    return { cx, cy, ux: Math.cos(t), uy: Math.sin(t) };
+  };
+  const off = (f, [x, y]) => (y - f.cy) * f.ux - (x - f.cx) * f.uy;
+  const worst = (f, a, b) => { let m = 0; for (let i = a; i <= b; i++) m = Math.max(m, Math.abs(off(f, pts[i]))); return m; };
+  const onto = (f, [x, y]) => { const t = (x - f.cx) * f.ux + (y - f.cy) * f.uy; return [f.cx + t * f.ux, f.cy + t * f.uy]; };
+  const runs = [];
+  for (let a = 0; a + minLen < n;) {
+    // The longest run from here that stays within reach of one straight line.
+    let b = a + minLen;
+    if (worst(fit(a, b), a, b) > reach) { a += step; continue; }
+    while (b + step < n && worst(fit(a, b + step), a, b + step) <= reach) b += step;
+    const f = fit(a, b);
+    // Back and forth across it, counting only swings well clear of the line.
+    let swings = 0, side = 0, sq = 0;
+    for (let i = a; i <= b; i++) {
+      const d = off(f, pts[i]);
+      sq += d * d;
+      const sg = d > 0.5 * lw ? 1 : d < -0.5 * lw ? -1 : 0;
+      if (sg && sg !== side) { if (side) swings++; side = sg; }
+    }
+    const len = b - a;
+    if (swings >= Math.max(4, len / (10 * lw)) && Math.sqrt(sq / (len + 1)) >= 0.4 * lw) {
+      const [ax, ay] = onto(f, pts[a]), [bx, by] = onto(f, pts[b]);
+      let best = 0, most = -1;
+      for (let d = -reach - lw; d <= reach + lw; d += 0.5) {
+        let on = 0;
+        for (let t = 0; t <= len; t++) on += ink[idx(ax + (bx - ax) * t / len - f.uy * d, ay + (by - ay) * t / len + f.ux * d, w, h)];
+        if (on > most || (on === most && Math.abs(d) < Math.abs(best))) { most = on; best = d; }
+      }
+      // Only where the map has a line to put it on: a zigzag round a
+      // badge or a scrap of lettering has none, and is better left alone.
+      if (most >= 0.6 * (len + 1)) { runs.push([a, b, { ...f, cx: f.cx - f.uy * best, cy: f.cy + f.ux * best }]); a = b; }
+      else a += step;
+    }
+    else a += step;
+  }
+  if (!runs.length) return l;
+  const out = [];
+  let at = 0;
+  for (const [a, b, f] of runs) {
+    for (let i = at; i < a; i++) out.push(pts[i]);
+    out.push(onto(f, pts[a]), onto(f, pts[b]));
+    at = b + 1;
+  }
+  for (let i = at; i < n; i++) out.push(pts[i]);
+  if (globalThis.TEETH) globalThis.TEETH.push(...runs.map(([a, b, f]) => [onto(f, pts[a]), onto(f, pts[b])]));
+  // A closed outline is thinned in two halves, split at its far side.
+  const [sx, sy] = out[0];
+  let far = 0;
+  out.forEach(([x, y], i) => { if ((x - sx) ** 2 + (y - sy) ** 2 > (out[far][0] - sx) ** 2 + (out[far][1] - sy) ** 2) far = i; });
+  return keepFarthest(out.slice(0, far + 1), 0.5).concat(keepFarthest(out.slice(far), 0.5).slice(1));
 }
 
 // Joins lines whose ends meet where no third line ends too.
