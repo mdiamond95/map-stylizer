@@ -5,6 +5,10 @@
 // stays its own layer.
 import assert from 'node:assert/strict';
 import { extractCombined } from '../src/core/combined.js';
+import { readFileSync } from 'node:fs';
+
+// The pull runs in the browser, where Node's `process` doesn't exist.
+assert.ok(!/\bprocess\./.test(readFileSync(new URL('../src/core/combined.js', import.meta.url), 'utf8')), 'no Node-only code in the pull');
 
 const W = 1200, H = 900;
 const rgba = new Uint8ClampedArray(W * H * 4);

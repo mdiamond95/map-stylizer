@@ -826,7 +826,6 @@ export function gridLines(colour, w, h, k, neat) {
       }
       return cover > 0.12 * len && hi - lo > 0.2 * len;
     });
-    if (process.env.GRIDDEBUG) console.error(across ? 'H' : 'V', peaks.slice(0, 20).map((p) => [p.pos, +(p.t * 180 / Math.PI).toFixed(1), p.votes, lined.includes(p) ? 'L' : '']));
     // (c) Grid lines are evenly spaced. The spacing comes from lines both
     // (a) and (b) are sure of; a line is kept when two of the three agree.
     const voted = (p) => p.votes >= 0.25 * len;
